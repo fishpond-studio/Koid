@@ -1,0 +1,50 @@
+[package]
+name = "koid"
+version = "0.1.0"
+description = "Koid — Not just code. It's Koid."
+license = "Apache-2.0"
+authors = ["Fishpond Studio"]
+edition = "2021"
+rust-version = "1.85"
+
+# 库目标供 Tauri 调用（移动端入口 + 桌面 bin 复用）
+[lib]
+name = "koid_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true
+
+[build-dependencies]
+tauri-build = { version = "2.6.3", features = [] }
+
+[dependencies]
+tauri = { version = "2.11.5", features = ["tray-icon", "devtools"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# SQLite 采用 bundled 编译，避免依赖系统 sqlite 版本差异
+rusqlite = { version = "0.40.2", features = ["bundled", "backup"] }
+# socks feature 支持 SOCKS5 代理（§4.4）
+reqwest = { version = "0.13.4", features = ["json", "stream", "socks", "rustls"], default-features = false }
+tokio = { version = "1", features = ["time", "sync", "rt", "macros", "process", "io-util"] }
+futures-util = "0.3"
+uuid = { version = "1", features = ["v4"] }
+# 系统 keyring：API Key 只存 Windows 凭据管理器 / macOS Keychain，不落 SQLite（§7.4）
+# keyring 4.x 默认 features 已含 v1 Entry API 与 windows-native 存储
+keyring = "4.1.6"
+thiserror = "2"
+# YAML 解析：Skill 定义（serde_yaml 已弃用，使用维护中的 serde_yml）
+serde_yml = "0.0.13"
+# 原生文件对话框：插件安装 / 备份导出导入
+tauri-plugin-dialog = "2.7.2"
+# 备份加密（AES-256-GCM）+ 口令派生
+aes-gcm = "0.11"
+sha2 = "0.11"
+getrandom = "0.4"
+# 插件 zip 安装包解压
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
+# DSML 泄漏标记解析（DeepSeek 文本形式工具调用救援）
+regex = "1"

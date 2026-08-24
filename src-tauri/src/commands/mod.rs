@@ -1,0 +1,14 @@
+pub mod backup;
+pub mod chat;
+pub mod mcp;
+pub mod messages;
+pub mod models;
+pub mod plugins;
+pub mod prompts;
+pub mod providers;
+pub mod proxy;
+pub mod sessions;
+pub mod settings;
+pub mod skills;
+pub mod tray;
+pub mod workspaces;

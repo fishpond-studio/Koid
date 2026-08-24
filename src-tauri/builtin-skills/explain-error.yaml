@@ -1,0 +1,23 @@
+# 内置 Skill：解释报错
+id: explain-error
+name: Explain Error
+description: Locate the root cause of an error and provide fix steps
+icon: bug
+
+steps:
+  - id: get-error
+    type: input
+    content: Paste the error message
+
+  - id: analyze
+    type: llm
+    prompt: |
+      Explain this error: identify the root cause and give actionable fix steps.
+
+      Error message:
+
+      {{get-error.output}}
+
+  - id: done
+    type: message
+    content: "{{analyze.output}}"

@@ -1,0 +1,32 @@
+# Node
+node_modules/
+dist/
+*.local
+
+# Rust / Tauri
+src-tauri/target/
+src-tauri/gen/schemas/
+
+# 文档站构建产物
+docs/.vitepress/cache/
+docs/.vitepress/dist/
+
+# 参考资料第三方仓库（他人代码，不入库）
+citation/
+
+# 内部规划文档
+plan/
+
+# 内部规划文档（不入库）
+plan/
+
+# 环境变量与日志
+.env
+.env.*
+*.log
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

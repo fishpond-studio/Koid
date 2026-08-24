@@ -1,0 +1,49 @@
+# 内置 Skill：Code Review（§4.7 示例 + Phase 3 验收目标）
+# 流程：输入代码 → LLM 审查 → 条件判断是否提到 bug → 有则修复 → 汇总输出
+id: code-review
+name: Code Review
+description: Review selected code for bugs and style issues
+icon: git-pull-request
+systemPrompt: You are a senior code reviewer. Be rigorous and specific.
+
+steps:
+  - id: read
+    type: input
+    content: Paste the code to review (or use the file picker in the dialog)
+
+  - id: review
+    type: llm
+    prompt: |
+      Please review the following code. List findings in three sections:
+      1. Potential bugs & edge cases
+      2. Security concerns
+      3. Style & best-practice suggestions
+
+      Code:
+
+      {{read.output}}
+
+  - id: check
+    type: condition
+    condition: contains( {{review.output}}, 'bug' )
+    then: fix
+    else: done
+
+  - id: fix
+    type: llm
+    prompt: |
+      Based on the review findings below, provide the fixed code.
+      Output complete code with brief inline fix notes.
+
+      Review findings:
+
+      {{review.output}}
+
+  - id: done
+    type: message
+    content: |
+      ## Review Result
+
+      {{review.output}}
+
+      {{fix.output}}

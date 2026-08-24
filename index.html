@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" type="image/png" href="/icon.png" />
+    <title>Koid</title>
+    <script>
+      // 首帧防闪烁：在 Vue 挂载前应用 localStorage 中持久化的主题，
+      // 与 Pinia persistedstate 的存储 key（koid-theme）保持约定一致
+      ;(function () {
+        try {
+          var raw = localStorage.getItem('koid-theme')
+          if (!raw) return
+          var s = JSON.parse(raw)
+          var el = document.documentElement
+          var dark =
+            s.mode === 'dark' ||
+            (s.mode !== 'light' &&
+              window.matchMedia('(prefers-color-scheme: dark)').matches)
+          el.classList.toggle('dark', dark)
+          if (s.color && s.color !== 'custom') el.setAttribute('data-theme', s.color)
+          if (s.density) el.setAttribute('data-density', s.density)
+          if (s.codeFont) el.style.setProperty('--font-mono', s.codeFont)
+          if (s.color === 'custom' && s.customPrimary) {
+            el.style.setProperty('--primary', s.customPrimary)
+            el.style.setProperty('--primary-foreground', '0 0% 100%')
+          }
+        } catch (e) {
+          /* 静默失败，使用默认主题 */
+        }
+      })()
+    </script>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

@@ -1,0 +1,12 @@
+pub mod agent;
+pub mod backup;
+pub mod dsml;
+pub mod failover;
+pub mod keyring;
+pub mod llm;
+pub mod mcp;
+pub mod plugin;
+pub mod proxy;
+pub mod settings;
+pub mod skills;
+pub mod tray;

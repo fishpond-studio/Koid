@@ -1,0 +1,109 @@
+name: Build & Release
+
+# 手动触发：三平台构建 + 自动创建 Release（版本号用日期+短 SHA）
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-latest
+            name: windows
+            args: --bundles nsis
+          - platform: macos-latest
+            name: macos
+            args: --target universal-apple-darwin --bundles dmg
+          - platform: ubuntu-22.04
+            name: linux
+            args: --bundles deb,appimage
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - name: Setup Rust (macOS targets)
+        if: matrix.platform == 'macos-latest'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Setup Rust
+        if: matrix.platform != 'macos-latest'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build installers
+        shell: bash
+        run: npm run tauri build -- ${{ matrix.args }}
+
+      # 扁平收集安装包：下载 artifact 后直接就是 exe/dmg/deb/AppImage，不用翻目录
+      - name: Collect installers (flatten)
+        shell: bash
+        run: |
+          mkdir -p artifacts
+          cp src-tauri/target/release/bundle/nsis/*.exe artifacts/ 2>/dev/null || true
+          cp src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg artifacts/ 2>/dev/null || true
+          cp src-tauri/target/release/bundle/deb/*.deb artifacts/ 2>/dev/null || true
+          cp src-tauri/target/release/bundle/appimage/*.AppImage artifacts/ 2>/dev/null || true
+          ls -la artifacts/
+
+      - name: Upload installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: koid-${{ matrix.name }}
+          path: artifacts/*
+          if-no-files-found: error
+          retention-days: 30
+
+  # 发布：下载三平台产物，自动创建 tag + Release 并附上安装包
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all platform artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: installers
+          merge-multiple: true
+
+      - name: List installers
+        run: ls -la installers/
+
+      - name: Generate version tag
+        id: ver
+        run: |
+          DATE=$(date +'%Y%m%d')
+          SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          echo "tag=v0.1.0-${DATE}.${SHA}" >> "$GITHUB_OUTPUT"
+          echo "name=Koid v0.1.0 (${DATE} ${SHA})" >> "$GITHUB_OUTPUT"
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: ${{ steps.ver.outputs.name }}
+          make_latest: true
+          generate_release_notes: true
+          files: installers/*

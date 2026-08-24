@@ -1,0 +1,226 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * Koid 主题系统
+ * 设计原则：所有组件只消费 CSS Variables，主题/模式/密度切换 = 改变量，零重渲染、零闪烁
+ * - data-theme: 6 套主题预设（indigo/emerald/rose/amber/violet/sky），自定义 HEX 由 JS 内联注入 --primary
+ * - .dark: 明暗模式
+ * - data-density: 密度。通过缩放根字号实现全局 padding/gap/font-size 联动（Tailwind 全部 rem 单位）
+ */
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 222.2 84% 4.9%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 222.2 84% 4.9%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 222.2 84% 4.9%;
+
+    /* 默认主题色 = indigo，随 data-theme 动态替换 */
+    --primary: 239 84% 67%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 210 40% 96.1%;
+    --secondary-foreground: 222.2 47.4% 11.2%;
+
+    --muted: 210 40% 96.1%;
+    --muted-foreground: 215.4 16.3% 46.9%;
+
+    --accent: 210 40% 96.1%;
+    --accent-foreground: 222.2 47.4% 11.2%;
+
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 210 40% 98%;
+
+    --border: 214.3 31.8% 91.4%;
+    --input: 214.3 31.8% 91.4%;
+    --ring: 239 84% 67%;
+
+    --radius: 0.5rem;
+
+    /* 密度系数：1 = default，0.85 = compact，1.15 = comfortable */
+    --density: 1;
+
+    /* 代码字体：按优先级回退，用户选择由 JS 覆盖此变量 */
+    --font-mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'SF Mono',
+      ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+
+  .dark {
+    --background: 222.2 84% 4.9%;
+    --foreground: 210 40% 98%;
+
+    --card: 222.2 84% 4.9%;
+    --card-foreground: 210 40% 98%;
+
+    --popover: 222.2 84% 4.9%;
+    --popover-foreground: 210 40% 98%;
+
+    --primary: 234 89% 74%;
+    --primary-foreground: 222.2 47.4% 11.2%;
+
+    --secondary: 217.2 32.6% 17.5%;
+    --secondary-foreground: 210 40% 98%;
+
+    --muted: 217.2 32.6% 17.5%;
+    --muted-foreground: 215 20.2% 65.1%;
+
+    --accent: 217.2 32.6% 17.5%;
+    --accent-foreground: 210 40% 98%;
+
+    --destructive: 0 62.8% 50.6%;
+    --destructive-foreground: 210 40% 98%;
+
+    --border: 217.2 32.6% 17.5%;
+    --input: 217.2 32.6% 17.5%;
+    --ring: 234 89% 74%;
+  }
+
+  /* ---------- 主题色预设（覆盖 primary / ring / primary-foreground）---------- */
+
+  /* indigo（与默认值一致，显式声明保证 data-theme 语义完整） */
+  [data-theme='indigo'] {
+    --primary: 239 84% 67%;
+    --primary-foreground: 0 0% 100%;
+    --ring: 239 84% 67%;
+  }
+  .dark[data-theme='indigo'] {
+    --primary: 234 89% 74%;
+    --primary-foreground: 222.2 47.4% 11.2%;
+    --ring: 234 89% 74%;
+  }
+
+  [data-theme='emerald'] {
+    --primary: 160 84% 39%;
+    --primary-foreground: 0 0% 100%;
+    --ring: 160 84% 39%;
+  }
+  .dark[data-theme='emerald'] {
+    --primary: 158 64% 52%;
+    --primary-foreground: 222.2 47.4% 11.2%;
+    --ring: 158 64% 52%;
+  }
+
+  [data-theme='rose'] {
+    --primary: 347 77% 50%;
+    --primary-foreground: 0 0% 100%;
+    --ring: 347 77% 50%;
+  }
+  .dark[data-theme='rose'] {
+    --primary: 350 89% 60%;
+    --primary-foreground: 0 0% 100%;
+    --ring: 350 89% 60%;
+  }
+
+  /* amber 明度较高，前景用深色保证对比度 */
+  [data-theme='amber'] {
+    --primary: 32 95% 44%;
+    --primary-foreground: 0 0% 100%;
+    --ring: 32 95% 44%;
+  }
+  .dark[data-theme='amber'] {
+    --primary: 32 86% 56%;
+    --primary-foreground: 22 72% 12%;
+    --ring: 32 86% 56%;
+  }
+
+  [data-theme='violet'] {
+    --primary: 271 91% 65%;
+    --primary-foreground: 0 0% 100%;
+    --ring: 271 91% 65%;
+  }
+  .dark[data-theme='violet'] {
+    --primary: 269 100% 74%;
+    --primary-foreground: 222.2 47.4% 11.2%;
+    --ring: 269 100% 74%;
+  }
+
+  [data-theme='sky'] {
+    --primary: 199 89% 48%;
+    --primary-foreground: 0 0% 100%;
+    --ring: 199 89% 48%;
+  }
+  .dark[data-theme='sky'] {
+    --primary: 198 93% 60%;
+    --primary-foreground: 222.2 47.4% 11.2%;
+    --ring: 198 93% 60%;
+  }
+
+  /* ---------- 密度：缩放根字号，全局 rem 尺寸联动 ---------- */
+  html[data-density='compact'] {
+    --density: 0.85;
+  }
+  html[data-density='comfortable'] {
+    --density: 1.15;
+  }
+  html {
+    font-size: calc(16px * var(--density));
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-family:
+      ui-sans-serif,
+      system-ui,
+      -apple-system,
+      'Segoe UI',
+      Roboto,
+      'PingFang SC',
+      'Microsoft YaHei',
+      sans-serif;
+  }
+}
+
+@layer components {
+  /* 毛玻璃浮层：侧边栏、菜单等复用（计划 §4.1：backdrop-blur-xl + 0.8 透明度） */
+  .glass {
+    @apply border border-border/60 bg-background/80 backdrop-blur-xl;
+  }
+}
+
+@layer utilities {
+  /* 搜索命中高亮标记 */
+  mark {
+    @apply rounded-sm bg-primary/25 px-0.5 text-foreground;
+  }
+
+  /* 搜索跳转定位消息的闪烁提示 */
+  .flash-highlight {
+    animation: koid-flash 1.6s ease-out;
+  }
+
+  /* 细滚动条：Zen 视觉，避免粗系统滚动条破坏留白 */
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: hsl(var(--border)) transparent;
+  }
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    background: hsl(var(--border));
+    border-radius: 3px;
+  }
+  .scrollbar-thin::-webkit-scrollbar-track {
+    background: transparent;
+  }
+}
+
+/* 搜索跳转定位：背景由 primary 淡出（ease-out 曲线，§二） */
+@keyframes koid-flash {
+  0% {
+    background-color: hsl(var(--primary) / 0.3);
+  }
+  100% {
+    background-color: transparent;
+  }
+}
