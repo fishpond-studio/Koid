@@ -109,6 +109,7 @@ export interface ToolCall {
 
 export interface ToolResult {
   toolCallId: string
+  name?: string
   content: string
   isError: boolean
 }
@@ -166,6 +167,7 @@ export interface ChatResponse {
   content: string
   reasoning?: string | null
   toolCalls?: ToolCall[] | null
+  toolResults?: ToolResult[] | null
   usage?: TokenUsage | null
   latencyMs: number
   providerUsed: string

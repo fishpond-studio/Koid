@@ -525,10 +525,23 @@ pub struct ChatResponse {
     pub reasoning: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
+    /// 本轮全部工具执行结果（供前端落库，跨轮次历史回放用）
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub tool_results: Option<Vec<ToolResultItem>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage: Option<TokenUsage>,
     pub latency_ms: u64,
     pub provider_used: String,
+}
+
+/// 工具执行结果（落库 + 历史回放的最小单元）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolResultItem {
+    pub tool_call_id: String,
+    pub name: String,
+    pub content: String,
+    pub is_error: bool,
 }
 
 /// chat_stream 增量事件载荷（事件名 chat:chunk）

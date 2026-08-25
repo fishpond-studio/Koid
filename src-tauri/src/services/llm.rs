@@ -369,6 +369,7 @@ pub async fn execute(
         } else {
             Some(tool_calls)
         },
+        tool_results: None,
         usage,
         latency_ms: start.elapsed().as_millis() as u64,
         provider_used: provider_name,

@@ -417,7 +417,7 @@ async fn run_shell_command(
 pub async fn run(
     _app: &tauri::AppHandle,
     state: &AppState,
-    req: ChatRequest,
+    mut req: ChatRequest,
     provider: crate::models::Provider,
     api_key: Option<String>,
     global_proxy: Option<crate::models::GlobalProxy>,
@@ -447,12 +447,32 @@ pub async fn run(
 
     let tools: Option<Vec<ToolDef>> = workspace_id.as_deref().map(|_| workspace_tools());
 
+    // Agent 模式注入编码规范：不注入时多数模型不会主动读文件就瞎改，
+    // 或改完不自查——这是"代码能力差"的最大来源
+    if tools.is_some() {
+        const AGENT_PROMPT: &str = r#"## Agent 操作规范
+你可以通过工具直接读写工作区文件。严格遵守：
+1. 动手前先看：编辑任何文件前必须先 read_file 它，禁止凭记忆或猜测修改。
+2. 修改已有文件用 edit_file，old_string 必须与文件当前内容逐字符一致（含缩进）；新建文件用 write_file。
+3. 多个独立的读取/搜索可以并行调用；有依赖的步骤必须等上一步结果。
+4. 改完自查：关键修改后重新 read_file 验证，能用 run_command 跑构建/测试就跑一遍。
+5. 路径一律用工作区相对路径，正斜杠分隔。
+6. 最终回答用中文简述：改了哪些文件、为什么、如何验证；不要大段粘贴文件内容。"#;
+        req.system = Some(match req.system.take() {
+            Some(s) if !s.trim().is_empty() => format!("{}\n\n{}", s.trim(), AGENT_PROMPT),
+            _ => AGENT_PROMPT.to_string(),
+        });
+    }
+
     // 内部消息列表：ChatMessage（含 tool_calls / tool_call_id），llm.rs 负责两协议序列化
     let mut messages: Vec<ChatMessage> = req.messages.clone();
 
     let mut final_content = String::new();
     let mut final_reasoning: Option<String> = None;
     let mut final_usage: Option<crate::models::TokenUsage> = None;
+    // 全部工具轮次记录：随最终响应返回，前端落库供跨轮历史回放
+    let mut all_calls: Vec<ToolCall> = Vec::new();
+    let mut all_results: Vec<crate::models::ToolResultItem> = Vec::new();
 
     for round in 0..MAX_AGENT_ROUNDS {
         if abort.load(std::sync::atomic::Ordering::Relaxed) {
@@ -502,10 +522,14 @@ pub async fn run(
             final_usage = resp.usage.clone();
         }
 
-        let Some(calls) = resp.tool_calls else {
+        let Some(mut calls) = resp.tool_calls else {
             // 无工具调用：本轮即最终回答
             break;
         };
+        // 工具参数容错修复：部分模型会输出 ```json 栅栏 / 尾逗号，导致解析失败
+        for c in calls.iter_mut() {
+            c.arguments = repair_tool_args(&c.arguments);
+        }
 
         // 有工具调用：追加 assistant 消息（含 tool_calls），执行工具，追加结果
         let tool_calls_json: Value = json!(
@@ -561,10 +585,18 @@ pub async fn run(
             // 工具结果：tool 角色（OpenAI）；llm.rs 对 Anthropic 转 tool_result 块
             messages.push(ChatMessage {
                 role: "tool".to_string(),
-                content: outcome.content,
+                content: outcome.content.clone(),
                 tool_calls: None,
                 tool_call_id: Some(call.id.clone()),
                 tool_name: Some(call.name.clone()),
+            });
+
+            all_calls.push(call.clone());
+            all_results.push(crate::models::ToolResultItem {
+                tool_call_id: call.id.clone(),
+                name: call.name.clone(),
+                content: outcome.content,
+                is_error: outcome.is_error,
             });
         }
     }
@@ -595,9 +627,75 @@ pub async fn run(
     Ok(ChatResponse {
         content: final_content,
         reasoning: final_reasoning,
-        tool_calls: None,
+        tool_calls: if all_calls.is_empty() { None } else { Some(all_calls) },
+        tool_results: if all_results.is_empty() { None } else { Some(all_results) },
         usage: final_usage,
         latency_ms: 0,
         provider_used: provider.name.clone(),
     })
+}
+
+/// 工具参数容错：剥离 ```json 栅栏、去除对象/数组尾逗号；已合法则原样返回
+fn repair_tool_args(args: &str) -> String {
+    let mut s = args.trim().to_string();
+    if s.is_empty() {
+        return "{}".to_string();
+    }
+    // 剥离 markdown 代码栅栏
+    if s.starts_with("```") {
+        s = s
+            .trim_start_matches("```json")
+            .trim_start_matches("```")
+            .trim_end_matches("```")
+            .trim()
+            .to_string();
+    }
+    if serde_json::from_str::<serde_json::Value>(&s).is_ok() {
+        return s;
+    }
+    // 去尾逗号：扫描 ",}" 与 ",]"（允许中间空白）
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len());
+    let mut in_str = false;
+    let mut escaped = false;
+    let mut i = 0;
+    while i < chars.len() {
+        let ch = chars[i];
+        if in_str {
+            out.push(ch);
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_str = false;
+            }
+            i += 1;
+            continue;
+        }
+        if ch == '"' {
+            in_str = true;
+            out.push(ch);
+            i += 1;
+            continue;
+        }
+        if ch == ',' {
+            // 向后看非空白字符，若为 } 或 ] 则跳过该逗号
+            let mut j = i + 1;
+            while j < chars.len() && chars[j].is_whitespace() {
+                j += 1;
+            }
+            if j < chars.len() && (chars[j] == '}' || chars[j] == ']') {
+                i += 1;
+                continue;
+            }
+        }
+        out.push(ch);
+        i += 1;
+    }
+    s = out;
+    if serde_json::from_str::<serde_json::Value>(&s).is_ok() {
+        return s;
+    }
+    args.trim().to_string()
 }

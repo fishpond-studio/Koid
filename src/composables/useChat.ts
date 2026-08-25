@@ -114,9 +114,54 @@ export function useChat() {
     streaming.value = { content: '', reasoning: '' }
     streamingSessionId.value = session.id
 
-    const history: ChatMessage[] = sessions.messages
-      .filter((m) => m.role === 'user' || m.role === 'assistant')
-      .map((m) => ({ role: m.role, content: m.content }))
+    /**
+     * 历史回放（跨轮次记忆的关键）：
+     * 含工具调用的 assistant 消息拆成 assistant(tool_calls) → tool 结果 →
+     * assistant(最终回答) 三段，模型才能"记得"自己读过/改过什么。
+     * 超长工具结果截断，防止上下文爆炸。
+     */
+    const TOOL_RESULT_MAX = 6000
+    const clip = (s: string) =>
+      s.length > TOOL_RESULT_MAX
+        ? s.slice(0, TOOL_RESULT_MAX) + `\n…[结果过长已截断，原长 ${s.length} 字符]`
+        : s
+
+    const history: ChatMessage[] = []
+    for (const m of sessions.messages) {
+      if (m.role === 'user') {
+        history.push({ role: 'user', content: m.content })
+        continue
+      }
+      if (m.role !== 'assistant') continue
+      const calls = m.toolCalls ?? []
+      if (calls.length === 0) {
+        history.push({ role: 'assistant', content: m.content })
+        continue
+      }
+      // assistant 工具调用消息（content 置空：正文是工具后的最终回答）
+      history.push({
+        role: 'assistant',
+        content: '',
+        toolCalls: calls.map((c) => ({
+          id: c.id,
+          type: 'function',
+          function: { name: c.name, arguments: c.arguments },
+        })),
+      } as ChatMessage)
+      // 每个调用对应一条 tool 结果
+      const results = m.toolResults ?? []
+      for (const c of calls) {
+        const r = results.find((x) => x.toolCallId === c.id)
+        history.push({
+          role: 'tool',
+          content: clip(r?.content ?? '（无执行记录）'),
+          toolCallId: c.id,
+          toolName: c.name,
+        } as ChatMessage)
+      }
+      // 最终回答
+      history.push({ role: 'assistant', content: m.content })
+    }
 
     const request: ChatRequest = {
       requestId: rid,
@@ -150,6 +195,8 @@ export function useChat() {
             role: 'assistant',
             content: text2,
             reasoning: reasoning || null,
+            toolCalls: chunk.result?.toolCalls ?? null,
+            toolResults: chunk.result?.toolResults ?? null,
             tokensUsed: chunk.result?.usage?.totalTokens ?? null,
             latencyMs: chunk.result?.latencyMs ?? null,
           })
