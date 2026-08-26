@@ -66,7 +66,7 @@ async function save() {
       // 展示名缺省用模型 ID（Rust 侧同样兜底）
       displayName: form.displayName.trim() || null,
       contextWindow: form.contextWindow,
-      capabilities: props.model?.capabilities ?? ['chat'],
+      capabilities: props.model?.capabilities ?? ['chat', 'tools'],
       enabled: form.enabled,
     })
     toast.success(t('common.saved'))

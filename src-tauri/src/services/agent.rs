@@ -179,7 +179,35 @@ async fn execute_tool(
                         (Some(s), None) => content.lines().skip(s.saturating_sub(1)).collect::<Vec<_>>().join("\n"),
                         _ => content,
                     };
-                    ToolOutcome { content: sliced, is_error: false }
+                    // 三重上限（对齐 opencode）：2000 行 / 单行 2000 字符 / 50KB，
+                    // 防止单次读取撑爆上下文
+                    const MAX_LINES: usize = 2000;
+                    const MAX_LINE_LEN: usize = 2000;
+                    const MAX_BYTES: usize = 50 * 1024;
+                    let mut out: Vec<String> = Vec::new();
+                    let mut bytes = 0usize;
+                    let mut truncated = false;
+                    for line in sliced.lines() {
+                        if out.len() >= MAX_LINES || bytes >= MAX_BYTES {
+                            truncated = true;
+                            break;
+                        }
+                        let mut l = line.to_string();
+                        if l.chars().count() > MAX_LINE_LEN {
+                            let head: String = l.chars().take(MAX_LINE_LEN).collect();
+                            l = format!("{head}... (line truncated to {MAX_LINE_LEN} chars)");
+                        }
+                        bytes += l.len();
+                        out.push(l);
+                    }
+                    let mut result = out.join("\n");
+                    if truncated {
+                        result.push_str(&format!(
+                            "\n\n[文件已截断：以上仅前 {} 行。用 start_line/end_line 参数继续读取]",
+                            out.len()
+                        ));
+                    }
+                    ToolOutcome { content: result, is_error: false }
                 }
                 Err(e) => ToolOutcome { content: e, is_error: true },
             }
@@ -445,19 +473,66 @@ pub async fn run(
         }
     };
 
-    let tools: Option<Vec<ToolDef>> = workspace_id.as_deref().map(|_| workspace_tools());
+    // 工具注入门禁（对齐 opencode 的 toolcall 能力声明）：
+    // 模型 capabilities 明确不含 "tools" 时降级为纯聊天——
+    // 强行给不支持函数调用的模型喂工具只会得到畸形调用和报错
+    let tools: Option<Vec<ToolDef>> = {
+        let model_supports_tools = {
+            let conn = state.db().ok();
+            conn.and_then(|c| {
+                let caps: Option<String> = c
+                    .query_row(
+                        "SELECT capabilities FROM models WHERE model_id = ?1 AND enabled = 1 LIMIT 1",
+                        rusqlite::params![req.model_id],
+                        |r| r.get(0),
+                    )
+                    .ok()
+                    .flatten();
+                match caps {
+                    // 未配置 capabilities（旧行为）→ 保守给工具
+                    None => Some(true),
+                    Some(json) => serde_json::from_str::<Vec<String>>(&json)
+                        .ok()
+                        .map(|v| v.iter().any(|c| c == "tools")),
+                }
+            })
+        };
+        let enabled = model_supports_tools.unwrap_or(true);
+        if workspace_id.is_some() && enabled {
+            Some(workspace_tools())
+        } else {
+            None
+        }
+    };
 
-    // Agent 模式注入编码规范：不注入时多数模型不会主动读文件就瞎改，
-    // 或改完不自查——这是"代码能力差"的最大来源
+    // Agent 模式注入编码规范（结构对齐 opencode default prompt）：
+    // 不注入时多数模型不会主动读文件就瞎改，或改完不自查、回答啰嗦
     if tools.is_some() {
-        const AGENT_PROMPT: &str = r#"## Agent 操作规范
-你可以通过工具直接读写工作区文件。严格遵守：
-1. 动手前先看：编辑任何文件前必须先 read_file 它，禁止凭记忆或猜测修改。
-2. 修改已有文件用 edit_file，old_string 必须与文件当前内容逐字符一致（含缩进）；新建文件用 write_file。
-3. 多个独立的读取/搜索可以并行调用；有依赖的步骤必须等上一步结果。
-4. 改完自查：关键修改后重新 read_file 验证，能用 run_command 跑构建/测试就跑一遍。
-5. 路径一律用工作区相对路径，正斜杠分隔。
-6. 最终回答用中文简述：改了哪些文件、为什么、如何验证；不要大段粘贴文件内容。"#;
+        const AGENT_PROMPT: &str = r#"## 角色与风格
+你是 Koid 的编码 Agent，通过工具直接读写工作区文件来完成软件工程任务。
+- 回答简洁直接：能 1-3 句说清就不写一段，不要开场白、总结性废话和说教。
+- 用输出文本与用户交流；工具只用来完成任务，不要把工具结果当回答。
+- 只做用户要求的事：不要顺手重构、不要主动加注释、不要 git commit，除非被明确要求。
+
+## 动手改代码前
+- 先理解目标文件：编辑前必须 read_file，禁止凭记忆或猜测修改。
+- 遵循现有代码约定：先看邻近文件怎么写，复用已有库与工具函数；不要臆测某个库存在，先在代码库里确认。
+- 修改已有文件用 edit_file，old_string 必须与文件当前内容逐字符一致（含缩进）；新建文件用 write_file。
+- 编辑前先看目标代码周边（尤其 import），保证改法符合该文件已有的框架与风格。
+- 安全习惯：不引入会泄露密钥/日志敏感信息的代码。
+
+## 执行任务
+- 先用 list_dir/grep/glob 摸清代码结构再动手；独立的信息收集调用应并行发起。
+- 完成后尽量验证：能用 run_command 跑构建/测试就跑，或 read_file 复查关键改动；不确定测试框架时先查 README 或代码库。
+
+## 工具使用策略
+- 路径一律用工作区相对路径，正斜杠分隔。
+- read_file 默认最多返回 2000 行；大文件用 start_line/end_line 分段读取。
+- 有多个独立工具调用时，在同一条消息里并行发起。
+
+## 最终回答
+- 用中文简述：改了哪些文件、为什么、如何验证；不要大段粘贴文件内容。
+- 引用具体代码时用 `文件路径:行号` 格式。"#;
         req.system = Some(match req.system.take() {
             Some(s) if !s.trim().is_empty() => format!("{}\n\n{}", s.trim(), AGENT_PROMPT),
             _ => AGENT_PROMPT.to_string(),
