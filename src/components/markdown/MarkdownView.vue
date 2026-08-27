@@ -75,6 +75,33 @@ DOMPurify.addHook('afterSanitizeAttributes', (node) => {
 
 let scheduled = false
 
+/**
+ * 解析结果缓存（模块级 LRU，上限 64 条）：
+ * 长对话切会话/撤回/编辑时同一条消息不再重复 marked+DOMPurify。
+ * key = content，流式中的内容不会命中（每帧都在变），不影响正确性。
+ */
+const CACHE_MAX = 64
+const htmlCache = new Map<string, string>()
+
+function cacheGet(key: string): string | null {
+  const hit = htmlCache.get(key)
+  if (hit !== undefined) {
+    // 命中后移到末尾（LRU）
+    htmlCache.delete(key)
+    htmlCache.set(key, hit)
+    return hit
+  }
+  return null
+}
+
+function cachePut(key: string, value: string) {
+  htmlCache.set(key, value)
+  if (htmlCache.size > CACHE_MAX) {
+    const oldest = htmlCache.keys().next().value
+    if (oldest !== undefined) htmlCache.delete(oldest)
+  }
+}
+
 function scheduleRender() {
   if (scheduled) return
   scheduled = true
@@ -84,9 +111,28 @@ function scheduleRender() {
   })
 }
 
+let lastStreamRender = 0
+
 async function render() {
-  const raw = marked.parse(props.content, { async: false }) as string
-  html.value = DOMPurify.sanitize(raw)
+  // 流式期间限频：最快 80ms 重解析一次（内容反正每帧都在变），
+  // 结束后（streaming=false）必定完整渲染一次
+  if (props.streaming) {
+    const now = performance.now()
+    if (now - lastStreamRender < 80) {
+      scheduleRender()
+      return
+    }
+    lastStreamRender = now
+  }
+  const cached = cacheGet(props.content)
+  if (cached !== null) {
+    html.value = cached
+  } else {
+    const raw = marked.parse(props.content, { async: false }) as string
+    const clean = DOMPurify.sanitize(raw)
+    cachePut(props.content, clean)
+    html.value = clean
+  }
   if (!props.streaming) {
     await nextTick()
     void highlightAll()

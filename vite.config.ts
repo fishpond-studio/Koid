@@ -1,4 +1,4 @@
-import { defineConfig } from 'vite'
+﻿import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import { fileURLToPath, URL } from 'node:url'
 
@@ -24,5 +24,7 @@ export default defineConfig({
     // Tauri 面向系统 WebView，无需为旧浏览器降级
     target: 'esnext',
     sourcemap: false,
+    // 关键：每次构建前清空产物目录，防止陈旧 hash 文件无限堆积
+    emptyOutDir: true,
   },
 })

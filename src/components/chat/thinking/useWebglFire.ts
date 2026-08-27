@@ -518,11 +518,6 @@ export function useWebglFire(
     gl.bindTexture(gl.TEXTURE_2D, blurV.tex)
     gl.uniform1i(U.compGlow, 1)
     gl.drawArrays(gl.TRIANGLES, 0, 6)
-
-    // ping-pong 交换（供下一帧模拟读取）
-    const tmp = simA
-    simA = simB
-    simB = tmp
   }
 
   return { setPalette, supported }

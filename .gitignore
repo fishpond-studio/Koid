@@ -30,3 +30,6 @@ plan/
 .idea/
 .DS_Store
 Thumbs.db
+
+# 排查临时基线产物
+.baseline-dist-agent/

@@ -100,20 +100,51 @@ pub async fn chat_stream(
             let emitted_flag = emitted.clone();
             let rid = request_id.clone();
             let win2 = window.clone();
+            // delta 聚合（性能）：逐 token emit 会造成 IPC 事件风暴，
+            // 这里按 16ms 窗口/8KB 阈值批量合并后再推给前端；首包立即发出降低首字延迟
+            let rid_for_flush = request_id.clone();
+            // (content 缓冲, reasoning 缓冲, 上次 flush 时刻)
+            let agg = Arc::new(std::sync::Mutex::new((
+                String::new(),
+                String::new(),
+                None::<std::time::Instant>,
+            )));
+            let agg2 = agg.clone();
             let sink: DeltaSink = Box::new(move |delta: &str, reasoning: Option<&str>| {
                 if !delta.is_empty() || reasoning.is_some() {
                     emitted_flag.store(true, Ordering::Relaxed);
                 }
-                let chunk = ChatChunk {
-                    request_id: rid.clone(),
-                    delta: delta.to_string(),
-                    reasoning_delta: reasoning.map(str::to_string),
-                    done: false,
-                    result: None,
-                    error: None,
-                    error_message: None,
-                };
-                let _ = win2.emit(CHUNK_EVENT, &chunk);
+                let mut guard = agg2.lock().unwrap();
+                let first_flush = guard.2.is_none();
+                guard.0.push_str(delta);
+                if let Some(r) = reasoning {
+                    guard.1.push_str(r);
+                }
+                let buffered = guard.0.len() + guard.1.len();
+                let should_flush = first_flush
+                    || buffered >= 8 * 1024
+                    || guard
+                        .2
+                        .map(|t| t.elapsed().as_millis() >= 16)
+                        .unwrap_or(false);
+                if should_flush {
+                    guard.2 = Some(std::time::Instant::now());
+                    let chunk = ChatChunk {
+                        request_id: rid.clone(),
+                        delta: std::mem::take(&mut guard.0),
+                        reasoning_delta: if guard.1.is_empty() {
+                            None
+                        } else {
+                            Some(std::mem::take(&mut guard.1))
+                        },
+                        done: false,
+                        result: None,
+                        error: None,
+                        error_message: None,
+                    };
+                    drop(guard);
+                    let _ = win2.emit(CHUNK_EVENT, &chunk);
+                }
             });
 
             let mut attempt_req = request.clone();
@@ -137,6 +168,27 @@ pub async fn chat_stream(
                     break;
                 }
                 Err(e) => {
+                    // 尝试失败前冲掉聚合缓冲，避免已生成内容随转移丢失
+                    {
+                        let mut guard = agg.lock().unwrap();
+                        if !guard.0.is_empty() || !guard.1.is_empty() {
+                            let chunk = ChatChunk {
+                                request_id: rid_for_flush.clone(),
+                                delta: std::mem::take(&mut guard.0),
+                                reasoning_delta: if guard.1.is_empty() {
+                                    None
+                                } else {
+                                    Some(std::mem::take(&mut guard.1))
+                                },
+                                done: false,
+                                result: None,
+                                error: None,
+                                error_message: None,
+                            };
+                            drop(guard);
+                            let _ = window.emit(CHUNK_EVENT, &chunk);
+                        }
+                    }
                     // 用户中断：立即退出，不做任何容灾
                     if abort_flag.load(Ordering::Relaxed) || e.starts_with("ABORTED") {
                         result = Err(e);

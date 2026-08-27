@@ -82,10 +82,21 @@ function onHandleDown(e: MouseEvent) {
   const startX = e.clientX
   const startW = width.value
   document.body.style.userSelect = 'none'
+  // rAF 合并：mousemove 高频触发，每帧只写入一次宽度，避免整应用反复 relayout
+  let pendingX: number | null = null
+  let raf = 0
+  const apply = () => {
+    raf = 0
+    if (pendingX === null) return
+    width.value = Math.min(400, Math.max(220, startW + pendingX - startX))
+    pendingX = null
+  }
   const move = (ev: MouseEvent) => {
-    width.value = Math.min(400, Math.max(220, startW + ev.clientX - startX))
+    pendingX = ev.clientX
+    if (!raf) raf = requestAnimationFrame(apply)
   }
   const up = () => {
+    if (raf) cancelAnimationFrame(raf)
     document.body.style.userSelect = ''
     window.removeEventListener('mousemove', move)
     window.removeEventListener('mouseup', up)

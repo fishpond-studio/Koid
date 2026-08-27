@@ -2,7 +2,7 @@
 import { computed, nextTick, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { toast } from 'vue-sonner'
-import { ArrowUp, Boxes, Command, FileText, Gauge, Slash, SquareStop, Wrench } from 'lucide-vue-next'
+import { ArrowUp, Boxes, Brain, ChevronDown, Command, FileText, Gauge, Slash, SquareStop, Wrench } from 'lucide-vue-next'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,

@@ -549,15 +549,20 @@ pub async fn run(
     let mut all_calls: Vec<ToolCall> = Vec::new();
     let mut all_results: Vec<crate::models::ToolResultItem> = Vec::new();
 
+    // 每轮请求的轻量基底：system（含合并的 Agent 提示词）与 tools 只在此克隆一次，
+    // messages 置空——循环内克隆不再重复拷贝大段提示词与旧消息
+    let mut base_req = req.clone();
+    base_req.messages = Vec::new();
+    base_req.tools = tools.clone();
+
     for round in 0..MAX_AGENT_ROUNDS {
         if abort.load(std::sync::atomic::Ordering::Relaxed) {
             return Err("ABORTED:用户停止了生成".to_string());
         }
 
-        // 构造本轮请求
-        let mut round_req = req.clone();
+        // 构造本轮请求：轻量基底 + 当前消息列表
+        let mut round_req = base_req.clone();
         round_req.messages = messages.clone();
-        round_req.tools = tools.clone();
 
         let ctx = LlmContext {
             provider: provider.clone(),
@@ -682,7 +687,7 @@ pub async fn run(
         if abort.load(std::sync::atomic::Ordering::Relaxed) {
             return Err("ABORTED:用户停止了生成".to_string());
         }
-        let mut closing_req = req.clone();
+        let mut closing_req = base_req.clone();
         closing_req.messages = messages.clone();
         closing_req.tools = None; // 不给工具，强制收尾
         let ctx = LlmContext {

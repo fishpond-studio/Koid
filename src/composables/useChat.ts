@@ -33,6 +33,29 @@ let unlistenFailover: UnlistenFn | null = null
 let unlistenTools: UnlistenFn | null = null
 let reasoningStartedAt: number | null = null
 let thinkingTimer: number | undefined
+// 流式缓冲：chunk 只写缓冲，rAF 合并后再刷入 streaming ref，
+// 避免每个 SSE token 都触发整棵 ChatView 重渲染（性能热点 #2）
+let bufContent = ''
+let bufReasoning = ''
+let flushRaf = 0
+
+/** 把缓冲刷入响应式状态（每帧最多一次） */
+function flushBuffer() {
+  flushRaf = 0
+  if (!streaming.value) return
+  if (bufContent) {
+    streaming.value.content += bufContent
+    bufContent = ''
+  }
+  if (bufReasoning) {
+    streaming.value.reasoning += bufReasoning
+    bufReasoning = ''
+  }
+}
+
+function scheduleFlush() {
+  if (!flushRaf) flushRaf = requestAnimationFrame(flushBuffer)
+}
 
 /** request id 生成：crypto.randomUUID 兜底（file:// 协议极端情况下可能不可用） */
 function newRequestId(): string {
@@ -67,6 +90,12 @@ export function useChat() {
     unlistenTools = null
     window.clearInterval(thinkingTimer)
     thinkingTimer = undefined
+    if (flushRaf) {
+      cancelAnimationFrame(flushRaf)
+      flushRaf = 0
+    }
+    bufContent = ''
+    bufReasoning = ''
     reasoningStartedAt = null
     thinkingSeconds.value = 0
   }
@@ -220,9 +249,9 @@ export function useChat() {
       if (c.requestId !== rid) return
       if (!c.done) {
         if (streaming.value) {
-          streaming.value.content += c.delta
+          bufContent += c.delta
           if (c.reasoningDelta) {
-            streaming.value.reasoning += c.reasoningDelta
+            bufReasoning += c.reasoningDelta
             // 首个思考增量到达时启动计时
             if (reasoningStartedAt === null) {
               reasoningStartedAt = Date.now()
@@ -235,8 +264,11 @@ export function useChat() {
               }, 500)
             }
           }
+          scheduleFlush()
         }
       } else {
+        // 完成前先同步刷掉残留缓冲，保证落库内容完整
+        flushBuffer()
         void finish(c)
       }
     })

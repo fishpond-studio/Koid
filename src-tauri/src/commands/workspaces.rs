@@ -266,9 +266,15 @@ pub(crate) fn grep_workspace(
     let mut files = Vec::new();
     walk_files(&root, &root, 0, &mut files)?;
 
+    // 正则匹配（工具描述向模型宣称的是正则语义）；编译失败回退为字面量包含
+    let re = regex::Regex::new(pattern).ok();
+    // 总读取字节上限：约束最坏情况，防止大项目 grep 长时间占用 worker
+    const MAX_TOTAL_BYTES: u64 = 32 * 1024 * 1024;
+    let mut total_read: u64 = 0;
+
     let mut out = Vec::new();
     for file in files {
-        if out.len() >= 200 {
+        if out.len() >= 200 || total_read >= MAX_TOTAL_BYTES {
             break;
         }
         let rel = file
@@ -292,8 +298,13 @@ pub(crate) fn grep_workspace(
         let Ok(content) = std::fs::read_to_string(&file) else {
             continue;
         };
+        total_read += content.len() as u64;
         for (idx, line) in content.lines().enumerate() {
-            if line.contains(pattern) {
+            let hit = match &re {
+                Some(r) => r.is_match(line),
+                None => line.contains(pattern),
+            };
+            if hit {
                 let num = idx + 1;
                 out.push(format!("{rel}:{num}: {line}"));
                 if out.len() >= 200 {

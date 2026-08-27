@@ -486,19 +486,24 @@ async fn stream_body(
         let chunk = chunk.map_err(|e| classify_reqwest(&e))?;
         buf.extend_from_slice(&chunk);
 
-        // SSE 按行处理：只取到完整行，结尾不完整片段留待下次拼接
-        while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
-            let line_bytes: Vec<u8> = buf.drain(..=pos).collect();
-            let line = String::from_utf8_lossy(&line_bytes);
+        // SSE 按行处理：先在缓冲上切片处理所有完整行（零中间分配），
+        // 循环结束后一次性 drain 掉已消费部分（原实现每行 drain 一次，O(行数×缓冲)）
+        let mut start = 0usize;
+        while let Some(rel) = buf[start..].iter().position(|&b| b == b'\n') {
+            let end = start + rel;
+            let line = String::from_utf8_lossy(&buf[start..end]);
             let line = line.trim();
-            if line.is_empty() {
-                continue;
+            if !line.is_empty() {
+                if is_anthropic {
+                    handle_anthropic_line(line, &mut content, &mut reasoning, &mut usage, &mut tools, sink);
+                } else {
+                    handle_openai_line(line, &mut content, &mut reasoning, &mut usage, &mut tools, sink);
+                }
             }
-            if is_anthropic {
-                handle_anthropic_line(line, &mut content, &mut reasoning, &mut usage, &mut tools, sink);
-            } else {
-                handle_openai_line(line, &mut content, &mut reasoning, &mut usage, &mut tools, sink);
-            }
+            start = end + 1;
+        }
+        if start > 0 {
+            buf.drain(..start);
         }
     }
 
