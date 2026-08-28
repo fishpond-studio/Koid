@@ -41,10 +41,16 @@ pub fn build_client(
     _proxy_type: &str,
     proxy_url: Option<&str>,
     timeout_secs: u64,
+    streaming: bool,
 ) -> Result<Client, String> {
     let mut builder = Client::builder()
-        .timeout(Duration::from_secs(timeout_secs.max(1)))
         .connect_timeout(Duration::from_secs(10));
+    // 总超时仅用于非流式请求。流式绝不能设：Client::timeout 覆盖「发起→读完整个
+    // 响应体」，长回答/长思考必然撞墙导致流被中途掐断（表现为对话老是断）。
+    // 流式的正确语义是「空闲超时」，由 llm.rs 在读流循环中逐 chunk 判定。
+    if !streaming {
+        builder = builder.timeout(Duration::from_secs(timeout_secs.max(1)));
+    }
 
     let user_url = proxy_url.map(str::trim).filter(|s| !s.is_empty());
 
@@ -80,7 +86,7 @@ pub async fn test_connectivity(
     timeout_secs: u64,
 ) -> ProxyTestResult {
     let start = Instant::now();
-    let client = match build_client(proxy_type_str(proxy_type), proxy_url, timeout_secs) {
+    let client = match build_client(proxy_type_str(proxy_type), proxy_url, timeout_secs, false) {
         Ok(c) => c,
         Err(e) => {
             return ProxyTestResult {

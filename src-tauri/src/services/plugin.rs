@@ -1,4 +1,4 @@
-//! 插件系统（§4.9）— Phase 3 基础版
+﻿//! 插件系统（§4.9）— Phase 3 基础版
 //!
 //! 范围：本地目录加载（app_data_dir/plugins/{id}/），manifest.json 声明元数据与权限，
 //! 前端以 iframe 沙箱（sandbox="allow-scripts"）+ postMessage 桥接运行。
@@ -196,7 +196,7 @@ pub async fn network_fetch(
         let proxy = st.db().ok().and_then(|conn| crate::services::settings::get_global_proxy(&conn));
         ("direct", proxy.and_then(|p| p.proxy_url))
     };
-    let client = crate::services::proxy::build_client(ptype, purl.as_deref(), 30)?;
+    let client = crate::services::proxy::build_client(ptype, purl.as_deref(), 30, false)?;
     let mut req = match method.to_uppercase().as_str() {
         "POST" => client.post(url),
         "PUT" => client.put(url),
@@ -332,7 +332,7 @@ pub async fn install_from_url(app: &AppHandle, url: &str) -> Result<PluginInfo, 
         let proxy = st.db().ok().and_then(|conn| crate::services::settings::get_global_proxy(&conn));
         ("direct", proxy.and_then(|p| p.proxy_url))
     };
-    let client = crate::services::proxy::build_client(ptype, purl.as_deref(), 60)?;
+    let client = crate::services::proxy::build_client(ptype, purl.as_deref(), 60, false)?;
     let resp = client
         .get(url)
         .send()

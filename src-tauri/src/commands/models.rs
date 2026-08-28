@@ -181,7 +181,7 @@ pub async fn discover_models(
 
     // 3. 代理解析（供应商 > 全局 > 环境变量）并构建客户端
     let (ptype, purl) = proxy::resolve_proxy(&provider, global_proxy.as_ref());
-    let client = proxy::build_client(ptype, purl.as_deref(), provider.timeout.max(1) as u64)?;
+    let client = proxy::build_client(ptype, purl.as_deref(), provider.timeout.max(1) as u64, false)?;
 
     // 4. 依次尝试 URL 候选，取第一个成功的响应
     let mut last_status: Option<u16> = None;

@@ -164,6 +164,27 @@ pub async fn chat_stream(
             .await
             {
                 Ok(resp) => {
+                    // 冲掉聚合缓冲的残留尾巴，保证流式内容完整（失败转移路径同理）
+                    {
+                        let mut guard = agg.lock().unwrap();
+                        if !guard.0.is_empty() || !guard.1.is_empty() {
+                            let chunk = ChatChunk {
+                                request_id: rid_for_flush.clone(),
+                                delta: std::mem::take(&mut guard.0),
+                                reasoning_delta: if guard.1.is_empty() {
+                                    None
+                                } else {
+                                    Some(std::mem::take(&mut guard.1))
+                                },
+                                done: false,
+                                result: None,
+                                error: None,
+                                error_message: None,
+                            };
+                            drop(guard);
+                            let _ = window.emit(CHUNK_EVENT, &chunk);
+                        }
+                    }
                     result = Ok(resp);
                     break;
                 }

@@ -310,7 +310,7 @@ pub async fn execute(
     let timeout_secs = ctx.provider.timeout.max(1) as u64;
     // 代理解析：供应商独立代理 > 全局代理 > 环境变量回退
     let (ptype, purl) = resolve_proxy(&ctx.provider, ctx.global_proxy.as_ref());
-    let client = build_client(ptype, purl.as_deref(), timeout_secs)?;
+    let client = build_client(ptype, purl.as_deref(), timeout_secs, req.stream)?;
 
     let builder = match ctx.provider.provider_type {
         ProviderType::OpenAiCompatible
@@ -327,14 +327,16 @@ pub async fn execute(
         .build()
         .map_err(|e| err("NETWORK", format!("构建请求失败: {e}")))?;
 
-    // 外层超时兜底（内层 reqwest timeout 通常先触发）
+    // 外层超时：覆盖「建连 + 收到响应头」阶段。
+    // 流式请求的响应体读取不在此超时内——由 stream_body 的空闲超时接管
+    // （provider.timeout 语义对流式 = 两次数据之间的最大间隔）
     let start = Instant::now();
     let resp = tokio::time::timeout(
         Duration::from_secs(timeout_secs + 5),
         client.execute(request),
     )
     .await
-    .map_err(|_| err("TIMEOUT", format!("请求超时（>{timeout_secs}s）")))?
+    .map_err(|_| err("TIMEOUT", format!("连接/响应头超时（>{timeout_secs}s）")))?
     .map_err(|e| classify_reqwest(&e))?;
 
     let status = resp.status();
@@ -347,7 +349,7 @@ pub async fn execute(
     let provider_name = ctx.provider.name.clone();
 
     let (content, reasoning, usage, tool_calls) = if req.stream {
-        stream_body(&ctx, resp, is_anthropic, sink).await?
+        stream_body(&ctx, resp, is_anthropic, timeout_secs, sink).await?
     } else {
         full_body(&ctx, resp, is_anthropic).await?
     };
@@ -469,6 +471,7 @@ async fn stream_body(
     ctx: &LlmContext,
     resp: reqwest::Response,
     is_anthropic: bool,
+    idle_secs: u64,
     sink: &DeltaSink,
 ) -> Result<(String, Option<String>, Option<TokenUsage>, Vec<crate::models::ToolCall>), String> {
     let mut stream = resp.bytes_stream();
@@ -478,12 +481,24 @@ async fn stream_body(
     let mut usage: Option<TokenUsage> = None;
     let mut tools = ToolAccumulator::default();
 
-    while let Some(chunk) = stream.next().await {
-        // 每次收到新数据先检查中断旗标，做到快速停止
+    // 空闲超时：只要数据持续到达就不限制总时长（流式长回答/长思考不再被掐断）
+    let idle = Duration::from_secs(idle_secs.max(1));
+    loop {
+        // 每次等待新数据前先检查中断旗标，做到快速停止
         if ctx.abort.load(Ordering::Relaxed) {
             return Err(err("ABORTED", "用户停止了生成"));
         }
-        let chunk = chunk.map_err(|e| classify_reqwest(&e))?;
+        let next = match tokio::time::timeout(idle, stream.next()).await {
+            Ok(Some(chunk)) => chunk,
+            Ok(None) => break, // 流正常结束
+            Err(_) => {
+                return Err(err(
+                    "TIMEOUT",
+                    format!("连接空闲超过 {idle_secs}s，服务器无数据返回"),
+                ))
+            }
+        };
+        let chunk = next.map_err(|e| classify_reqwest(&e))?;
         buf.extend_from_slice(&chunk);
 
         // SSE 按行处理：先在缓冲上切片处理所有完整行（零中间分配），
