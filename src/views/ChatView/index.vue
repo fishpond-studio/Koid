@@ -496,6 +496,46 @@ async function onEditMessage(messageId: string) {
   }
 }
 
+/** 最后一条 assistant 消息 id：仅它显示「重新生成」 */
+const lastAssistantId = computed(() => {
+  for (let i = sessions.messages.length - 1; i >= 0; i--) {
+    if (sessions.messages[i].role === 'assistant') return sessions.messages[i].id
+  }
+  return null
+})
+
+/**
+ * 重新生成：删除该回答及之后内容，回退到其触发的用户消息原文重发。
+ * 先校验模型可用再删库，避免删完发不出去导致消息丢失。
+ */
+async function onRegenerate(messageId: string) {
+  const s = sessions.current
+  if (!s || sending.value) return
+  if (!models.get(s.modelId ?? '')) {
+    toast.error(t('chat.noModel'))
+    return
+  }
+  const idx = sessions.messages.findIndex((m) => m.id === messageId)
+  if (idx < 0) return
+  let userIdx = -1
+  for (let i = idx - 1; i >= 0; i--) {
+    if (sessions.messages[i].role === 'user') {
+      userIdx = i
+      break
+    }
+  }
+  if (userIdx < 0) return
+  const userMsg = sessions.messages[userIdx]
+  if (!userMsg.content) return
+  try {
+    await messagesApi.deleteFrom(s.id, userMsg.id)
+    await sessions.open(s.id)
+    await send(userMsg.content)
+  } catch (e) {
+    toast.error(toApiError(e).message)
+  }
+}
+
 // 思考过程过长自动收缩：超过阈值字符自动折叠一次，之后尊重用户手动展开/折叠
 const REASONING_EXPAND_LIMIT = 500
 const reasoningExpanded = ref(true)
@@ -690,10 +730,12 @@ const showWelcome = computed(
           v-for="m in sessions.messages"
           :key="m.id"
           :message="m"
+          :can-regenerate="m.id === lastAssistantId && !sending"
           @branch="(id: string) => void onBranch(id)"
           @preview="onPreview"
           @edit="(id: string) => void onEditMessage(id)"
           @retract="(id: string) => void onRetractMessage(id)"
+          @regenerate="(id: string) => void onRegenerate(id)"
         />
 
         <!-- 工具调用（agent 循环：模型自主探索项目；执行中展开、完成后自动收起） -->

@@ -114,6 +114,7 @@ export default {
       branch: 'Branch from here',
       edit: 'Edit & resend',
       retract: 'Retract',
+      regenerate: 'Regenerate',
       reasoning: 'Reasoning',
       thinking: 'Thinking…',
       thoughtFor: 'Thought for {n}s',
@@ -400,5 +401,10 @@ export default {
     hide: 'Hide to tray',
     ask: 'Ask again next time',
     quit: 'Quit',
+  },
+  update: {
+    available: 'New version v{version} available',
+    availableHint: 'Click "Download" to get the latest installer',
+    download: 'Download',
   },
 }

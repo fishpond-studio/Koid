@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { Brain, Check, Copy, GitBranch, Pencil, Undo2 } from 'lucide-vue-next'
+import { Brain, Check, Copy, GitBranch, Pencil, RefreshCw, Undo2 } from 'lucide-vue-next'
 import MarkdownView from '@/components/markdown/MarkdownView.vue'
 import type { Message } from '@/types'
 
@@ -11,7 +11,11 @@ import type { Message } from '@/types'
  * - assistant：左对齐，muted 背景，Markdown 渲染 + 思考过程折叠
  * - data-mid：供搜索跳转滚动定位（§4.5.3）
  */
-const props = defineProps<{ message: Message }>()
+const props = defineProps<{
+  message: Message
+  /** 仅最后一条 assistant 消息显示「重新生成」 */
+  canRegenerate?: boolean
+}>()
 const emit = defineEmits<{
   branch: [messageId: string]
   preview: [payload: { lang: string; code: string }]
@@ -19,6 +23,8 @@ const emit = defineEmits<{
   edit: [messageId: string]
   /** 撤回该用户消息及其后的全部消息 */
   retract: [messageId: string]
+  /** 删除该 assistant 回答并以原用户消息重新生成 */
+  regenerate: [messageId: string]
 }>()
 const { t } = useI18n()
 
@@ -95,9 +101,18 @@ const latencyText = computed(() => {
       <MarkdownView :content="message.content" @preview="(p) => emit('preview', p)" />
     </div>
 
-    <!-- 元信息：耗时 / 复制 / 分支（§4.5.4）；token 用量集中在聊天头部展示 -->
+    <!-- 元信息：耗时 / 复制 / 分支 / 重新生成（§4.5.4）；token 用量集中在聊天头部展示 -->
     <div class="mt-1 flex items-center gap-2 pl-1 text-xs text-muted-foreground">
       <span v-if="latencyText">{{ latencyText }}</span>
+      <button
+        v-if="canRegenerate"
+        class="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100"
+        :title="t('chat.message.regenerate')"
+        @click="emit('regenerate', message.id)"
+      >
+        <RefreshCw class="size-3" />
+        {{ t('chat.message.regenerate') }}
+      </button>
       <button
         class="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100"
         :title="t('chat.message.copy')"

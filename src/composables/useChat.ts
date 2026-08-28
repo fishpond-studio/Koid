@@ -65,6 +65,20 @@ function newRequestId(): string {
   return `${Date.now()}-${Math.random().toString(16).slice(2)}`
 }
 
+/** 会话自动标题：取首行非空文本，去掉 Markdown 修饰符后截 30 字（避免截半句/带符号） */
+function deriveTitle(text: string): string {
+  const firstLine =
+    text
+      .split('\n')
+      .map((l) => l.trim())
+      .find((l) => l.length > 0) ?? ''
+  const cleaned = firstLine
+    .replace(/^[#>*\-\s]+/, '')
+    .replaceAll(/[`*[\]]/g, '')
+    .trim()
+  return (cleaned || firstLine).slice(0, 30)
+}
+
 /**
  * 对话闭环：发送 → 持久化用户消息 → chat_stream → 监听 chat:chunk →
  * 增量渲染 → done 时持久化 assistant 消息。
@@ -133,7 +147,7 @@ export function useChat() {
 
     // 首次发言自动生成标题（截取前 30 字符，失败不影响主流程）
     if (!session.title || session.title === '新对话') {
-      void sessions.update(session.id, { title: content.slice(0, 30) }).catch(() => {})
+      void sessions.update(session.id, { title: deriveTitle(content) }).catch(() => {})
     }
 
     // 2) 组装请求：内部统一 OpenAI 消息格式，system 单独字段（§6.1）

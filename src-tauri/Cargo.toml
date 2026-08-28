@@ -40,6 +40,10 @@ thiserror = "2"
 serde_yml = "0.0.13"
 # 原生文件对话框：插件安装 / 备份导出导入
 tauri-plugin-dialog = "2.7.2"
+# 单实例锁：二次启动聚焦已有窗口（纯 Rust 侧，无 JS API）
+tauri-plugin-single-instance = "2"
+# 外链打开：更新提示跳转 GitHub Releases（系统默认浏览器）
+tauri-plugin-opener = "2"
 # 备份加密（AES-256-GCM）+ 口令派生
 aes-gcm = "0.11"
 sha2 = "0.11"

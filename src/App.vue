@@ -2,11 +2,16 @@
 import { RouterView } from 'vue-router'
 import { Toaster } from '@/components/ui/sonner'
 import { useThemeWatcher } from '@/composables/useTheme'
+import { useUpdateCheck } from '@/composables/useUpdateCheck'
 import CommandPalette from '@/components/CommandPalette.vue'
 import CloseAskDialog from '@/components/CloseAskDialog.vue'
 
 // 顶层负责：主题副作用、全局 Toast 挂载、命令面板（Cmd+K）、关闭询问框
 useThemeWatcher()
+
+// 更新检查：延迟 3s，避开启动时的网络与渲染高峰；失败静默
+const { check: checkUpdate } = useUpdateCheck()
+window.setTimeout(() => void checkUpdate(), 3000)
 </script>
 
 <template>

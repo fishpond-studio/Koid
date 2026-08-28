@@ -112,6 +112,7 @@ export default {
       branch: '从此处分支',
       edit: '编辑并重发',
       retract: '撤回',
+      regenerate: '重新生成',
       reasoning: '思考过程',
       thinking: '思考中…',
       thoughtFor: '已思考 {n} 秒',
@@ -386,5 +387,10 @@ export default {
     hide: '隐藏到托盘',
     ask: '下次再问',
     quit: '退出',
+  },
+  update: {
+    available: '发现新版本 v{version}',
+    availableHint: '点击「前往下载」获取最新安装包',
+    download: '前往下载',
   },
 }
