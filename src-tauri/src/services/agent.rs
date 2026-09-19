@@ -295,11 +295,10 @@ async fn execute_tool(
                 Ok(c) => c,
                 Err(e) => return ToolOutcome { content: e, is_error: true },
             };
-            // 归一化 CRLF 换行符避免跨平台比对失败
-            let norm_old = old_string.replace("\r\n", "\n");
-            let norm_new = new_string.replace("\r\n", "\n");
+            // 行尾对齐由 edit_workspace_file_content 按文件实际 EOL 统一处理，
+            // 此处不再单方面压成 LF（那会让 CRLF 文件失配，并在写回时产生混合行尾）
             match crate::commands::workspaces::edit_workspace_file_content(
-                &conn, workspace_id, &path, &norm_old, &norm_new,
+                &conn, workspace_id, &path, &old_string, &new_string,
             ) {
                 Ok(msg) => ToolOutcome { content: msg, is_error: false },
                 Err(e) => ToolOutcome { content: e, is_error: true },

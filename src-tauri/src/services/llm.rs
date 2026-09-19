@@ -81,13 +81,53 @@ fn classify_status(status: StatusCode, body: &str) -> String {
 
 // ---------- 请求构造 ----------
 
+/// 是否 OpenAI 官方端点。
+///
+/// 推理模型的那套特殊参数形态（developer 角色、禁 temperature/top_p、
+/// max_completion_tokens）只有 OpenAI 官方认。DeepSeek、Ollama、vLLM 与各类中转
+/// 走的是同一个 build_openai_request，却大多只接受 system + max_tokens，
+/// 按模型名一刀切反而会替它们造出 400，所以必须按端点门控。
+fn is_openai_official(base_url: &str) -> bool {
+    let lowered = base_url.to_lowercase();
+    let after_scheme = lowered.split("://").nth(1).unwrap_or(&lowered);
+    let authority = after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("")
+        // 去掉 user:pass@ 前缀
+        .rsplit('@')
+        .next()
+        .unwrap_or("");
+    // 去掉 :port（IPv6 字面量在此会解析失败，但那种情况本就不是官方端点，返回 false 即回退到安全行为）
+    let host = match authority.split_once(':') {
+        Some((h, _)) => h,
+        None => authority,
+    };
+    host == "api.openai.com"
+}
+
+/// 是否推理模型。仅用于 OpenAI 官方端点的参数形态判定，见 [`is_openai_official`]。
 fn is_reasoning_model(model: &str) -> bool {
-    let m = model.to_lowercase();
-    m.starts_with("o1")
-        || m.starts_with("o3")
-        || m.contains("reasoner")
-        || m.contains("deepseek-r1")
-        || m.contains("r1")
+    let lowered = model.to_lowercase();
+    // 剥掉 "openai/" 之类的供应商前缀与 ":latest" 之类的 tag，只看模型名本体，
+    // 否则带前缀的 id（openai/o1-mini）会漏判
+    let after_slash = lowered.rsplit('/').next().unwrap_or(&lowered);
+    let name = after_slash.split(':').next().unwrap_or(after_slash);
+    // 切词后整词比对：裸 contains("r1") 会命中大量无关名字
+    let words: Vec<&str> = name
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let word = |w: &str| words.iter().any(|x| *x == w);
+    name.starts_with("o1")
+        || name.starts_with("o3")
+        || name.starts_with("o4")
+        || name.starts_with("gpt-5")
+        || word("r1")
+        || word("reasoner")
+        || word("reasoning")
+        || word("thinking")
+        || word("qwq")
 }
 
 fn build_openai_request(
@@ -95,8 +135,8 @@ fn build_openai_request(
     req: &ChatRequest,
     client: &reqwest::Client,
 ) -> reqwest::RequestBuilder {
-    let is_reasoning = is_reasoning_model(&req.model_id);
-    let system_role = if is_reasoning { "developer" } else { "system" };
+    let reasoning = is_openai_official(&ctx.provider.base_url) && is_reasoning_model(&req.model_id);
+    let system_role = if reasoning { "developer" } else { "system" };
 
     // system 提示词置顶为 system/developer 消息
     let mut messages: Vec<Value> = Vec::new();
@@ -106,7 +146,7 @@ fn build_openai_request(
         }
     }
     for m in &req.messages {
-        let role = if is_reasoning && m.role == "system" { "developer" } else { m.role.as_str() };
+        let role = if reasoning && m.role == "system" { "developer" } else { m.role.as_str() };
         let mut msg = json!({ "role": role, "content": m.content });
         if let Some(tc) = &m.tool_calls {
             msg["tool_calls"] = tc.clone();
@@ -123,8 +163,9 @@ fn build_openai_request(
         "stream": req.stream,
     });
 
-    // 推理模型官方禁止传入自定义 temperature 与 top_p，避免 400 报错
-    if !is_reasoning {
+    // OpenAI 官方推理模型禁止自定义 temperature 与 top_p，否则 400；
+    // 其余端点（含 DeepSeek-R1，其官方推荐 temperature=0.6）照常下发
+    if !reasoning {
         if let Some(t) = req.temperature {
             body["temperature"] = json!(t);
         }
@@ -133,7 +174,10 @@ fn build_openai_request(
         }
     }
     if let Some(m) = req.max_tokens {
-        body["max_tokens"] = json!(m);
+        // OpenAI 推理模型同样拒绝 max_tokens，要求 max_completion_tokens；
+        // 只剥 temperature/top_p 而不改名，o 系仍会 400
+        let key = if reasoning { "max_completion_tokens" } else { "max_tokens" };
+        body[key] = json!(m);
     }
     // 思考强度（OpenAI o 系/gpt-5 reasoning_effort；"default" 与 None 均不下发）。
     // "max" 映射为 xhigh——仅部分新模型支持，不支持者返回 BAD_REQUEST 时用户可降档。
@@ -580,17 +624,14 @@ pub(crate) fn handle_openai_line(
             }
         }
         // 兼容多供应商思考过程字段：reasoning_content / reasoning / thought
-        let reasoning_val = delta
-            .get("reasoning_content")
-            .or_else(|| delta.get("reasoning"))
-            .or_else(|| delta.get("thought"))
-            .and_then(Value::as_str);
+        // 不能串 get().or_else(get())：某字段存在但值为 null 时 or_else 不再回退，思考内容会被丢弃
+        let reasoning_val = ["reasoning_content", "reasoning", "thought"]
+            .into_iter()
+            .find_map(|k| delta.get(k).and_then(Value::as_str).filter(|s| !s.is_empty()));
 
         if let Some(r) = reasoning_val {
-            if !r.is_empty() {
-                reasoning.push_str(r);
-                sink("", Some(r));
-            }
+            reasoning.push_str(r);
+            sink("", Some(r));
         }
         // 工具调用增量（agent 循环）
         tools.apply_openai_delta(delta);

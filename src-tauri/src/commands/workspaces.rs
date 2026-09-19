@@ -527,15 +527,30 @@ pub(crate) fn edit_workspace_file_content(
     if old_string.is_empty() {
         return Err("old_string 不能为空".to_string());
     }
-    if old_string == new_string {
-        return Err("old_string 与 new_string 相同".to_string());
-    }
     let full = workspace_abs(conn, workspace_id, rel_path)?;
     if !full.is_file() {
         return Err(format!("文件不存在: {rel_path}"));
     }
     let original = std::fs::read_to_string(&full).map_err(|e| format!("读取失败: {e}"))?;
-    let occurrences = original.matches(old_string).count();
+    // 行尾对齐：模型几乎总是发 LF，而 Windows 工作区文件常是 CRLF。
+    // 拿 LF 去匹配 CRLF 文件必然失配；反过来把 LF 写回 CRLF 文件又会产生混合行尾。
+    // 故先探测文件主行尾，再把两侧统一转换过去（放在此处可同时覆盖前端命令与 agent 工具两条路径）。
+    let crlf = original.matches("\r\n").count();
+    let lf = original.matches('\n').count().saturating_sub(crlf);
+    let align_eol = |s: &str| -> String {
+        let as_lf = s.replace("\r\n", "\n");
+        if crlf > lf {
+            as_lf.replace('\n', "\r\n")
+        } else {
+            as_lf
+        }
+    };
+    let old_norm = align_eol(old_string);
+    let new_norm = align_eol(new_string);
+    if old_norm == new_norm {
+        return Err("old_string 与 new_string 相同".to_string());
+    }
+    let occurrences = original.matches(&old_norm).count();
     if occurrences == 0 {
         return Err(format!("未在 {rel_path} 中找到匹配内容（old_string 不存在）"));
     }
@@ -544,7 +559,7 @@ pub(crate) fn edit_workspace_file_content(
             "old_string 在 {rel_path} 中出现 {occurrences} 次，不是唯一匹配；请补充更多上下文"
         ));
     }
-    let edited = original.replacen(old_string, new_string, 1);
+    let edited = original.replacen(&old_norm, &new_norm, 1);
     let new_bytes = edited.as_bytes().len();
     if new_bytes > MAX_WRITE_BYTES {
         return Err(format!("编辑后内容超过 {MAX_WRITE_BYTES} 字节上限"));
