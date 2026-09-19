@@ -517,6 +517,21 @@ pub(crate) fn write_workspace_file_content(
 }
 
 /// Agent 工具：精确字符串替换编辑（old_string 须在文件中唯一出现，对齐 Aider/opencode）
+/// 把 `s` 的行尾对齐到 `file_content` 的主行尾。
+///
+/// 模型几乎总是发 LF，而 Windows 工作区文件常是 CRLF：拿 LF 去匹配 CRLF 文件必然失配，
+/// 反过来把 LF 写回 CRLF 文件又会产生混合行尾。抽成纯函数以便单测这套判定。
+fn align_to_file_eol(file_content: &str, s: &str) -> String {
+    let crlf = file_content.matches("\r\n").count();
+    let lf = file_content.matches('\n').count().saturating_sub(crlf);
+    let as_lf = s.replace("\r\n", "\n");
+    if crlf > lf {
+        as_lf.replace('\n', "\r\n")
+    } else {
+        as_lf
+    }
+}
+
 pub(crate) fn edit_workspace_file_content(
     conn: &Connection,
     workspace_id: &str,
@@ -532,21 +547,9 @@ pub(crate) fn edit_workspace_file_content(
         return Err(format!("文件不存在: {rel_path}"));
     }
     let original = std::fs::read_to_string(&full).map_err(|e| format!("读取失败: {e}"))?;
-    // 行尾对齐：模型几乎总是发 LF，而 Windows 工作区文件常是 CRLF。
-    // 拿 LF 去匹配 CRLF 文件必然失配；反过来把 LF 写回 CRLF 文件又会产生混合行尾。
-    // 故先探测文件主行尾，再把两侧统一转换过去（放在此处可同时覆盖前端命令与 agent 工具两条路径）。
-    let crlf = original.matches("\r\n").count();
-    let lf = original.matches('\n').count().saturating_sub(crlf);
-    let align_eol = |s: &str| -> String {
-        let as_lf = s.replace("\r\n", "\n");
-        if crlf > lf {
-            as_lf.replace('\n', "\r\n")
-        } else {
-            as_lf
-        }
-    };
-    let old_norm = align_eol(old_string);
-    let new_norm = align_eol(new_string);
+    // 行尾对齐放在此处，可同时覆盖前端命令与 agent 工具两条调用路径
+    let old_norm = align_to_file_eol(&original, old_string);
+    let new_norm = align_to_file_eol(&original, new_string);
     if old_norm == new_norm {
         return Err("old_string 与 new_string 相同".to_string());
     }
@@ -619,4 +622,47 @@ pub fn delete_workspace_file(
 ) -> Result<String, String> {
     let conn = state.db()?;
     delete_workspace_file_content(&conn, &workspace_id, &rel_path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::align_to_file_eol;
+
+    #[test]
+    fn aligns_to_dominant_file_eol() {
+        let crlf_file = "a = 1\r\nb = 2\r\nc = 3\r\n";
+        // CRLF 文件 + 模型发来的 LF：必须转成 CRLF 才可能匹配上
+        assert_eq!(align_to_file_eol(crlf_file, "a = 1\nb = 2"), "a = 1\r\nb = 2");
+        // 入参本身带 CRLF 时也先归一再对齐，结果稳定
+        assert_eq!(align_to_file_eol(crlf_file, "a = 1\r\nb = 2"), "a = 1\r\nb = 2");
+        // 单行入参没有换行，原样返回
+        assert_eq!(align_to_file_eol(crlf_file, "a = 1"), "a = 1");
+
+        let lf_file = "a = 1\nb = 2\n";
+        // LF 文件 + 入参带 CRLF：压回 LF，避免写出混合行尾
+        assert_eq!(align_to_file_eol(lf_file, "a = 1\r\nb = 2"), "a = 1\nb = 2");
+        assert_eq!(align_to_file_eol(lf_file, "a = 1\nb = 2"), "a = 1\nb = 2");
+
+        // 文件无换行、或 CRLF 与 LF 打平时，都退回 LF（不主动引入 CRLF）
+        assert_eq!(align_to_file_eol("single line", "x\ny"), "x\ny");
+        assert_eq!(align_to_file_eol("a\r\nb\n", "x\ny"), "x\ny");
+    }
+
+    #[test]
+    fn aligned_old_string_actually_matches_crlf_file() {
+        let file = "fn main() {\r\n    println!(\"hi\");\r\n}\r\n";
+        let old_from_model = "fn main() {\n    println!(\"hi\");\n}";
+
+        // 回归防护：原实现把入参单方面压成 LF 后拿去匹配 CRLF 文件，命中数恒为 0
+        assert_eq!(file.matches(old_from_model).count(), 0);
+
+        let aligned_old = align_to_file_eol(file, old_from_model);
+        assert_eq!(file.matches(&aligned_old).count(), 1);
+
+        let new_from_model = "fn main() {\n    println!(\"bye\");\n}";
+        let edited = file.replacen(&aligned_old, &align_to_file_eol(file, new_from_model), 1);
+        assert_eq!(edited.matches("\r\n").count(), 3);
+        assert_eq!(edited.matches('\n').count(), 3, "不应残留裸 LF");
+        assert!(edited.contains("println!(\"bye\");"));
+    }
 }

@@ -934,4 +934,66 @@ mod tests {
         assert_eq!(calls[0].name, "list_dir");
         assert_eq!(calls[0].arguments, r#"{"path":"src"}"#);
     }
+
+    #[test]
+    fn openai_official_detection_only_matches_api_openai_com_host() {
+        // 官方端点：带不带 /v1、带不带端口、带不带 scheme 都要认出来
+        assert!(is_openai_official("https://api.openai.com/v1"));
+        assert!(is_openai_official("https://api.openai.com"));
+        assert!(is_openai_official("https://api.openai.com:443/v1"));
+        assert!(is_openai_official("api.openai.com/v1"));
+        // 兼容端点只认 system + max_tokens，误判成官方会替它们造出 400
+        assert!(!is_openai_official("https://api.deepseek.com/v1"));
+        assert!(!is_openai_official("http://localhost:11434/v1"));
+        assert!(!is_openai_official("https://openrouter.ai/api/v1"));
+        assert!(!is_openai_official("https://xxx.openai.azure.com"));
+        // 子域名与形近域名不能命中
+        assert!(!is_openai_official("https://not-api.openai.com/v1"));
+        assert!(!is_openai_official("https://api.openai.com.evil.example/v1"));
+    }
+
+    #[test]
+    fn reasoning_model_detection_strips_prefix_and_matches_whole_words() {
+        // 带供应商前缀或 Ollama tag 时不能漏判
+        assert!(is_reasoning_model("o1"));
+        assert!(is_reasoning_model("openai/o1-mini"));
+        assert!(is_reasoning_model("o3-mini"));
+        assert!(is_reasoning_model("o4-mini"));
+        assert!(is_reasoning_model("gpt-5"));
+        assert!(is_reasoning_model("deepseek-ai/DeepSeek-R1-0528:latest"));
+        assert!(is_reasoning_model("deepseek-reasoner"));
+        assert!(is_reasoning_model("qwq-32b"));
+        assert!(is_reasoning_model("phi-4-reasoning"));
+        // 非推理模型
+        assert!(!is_reasoning_model("gpt-4o"));
+        assert!(!is_reasoning_model("gpt-4.1-mini"));
+        assert!(!is_reasoning_model("deepseek-chat"));
+        assert!(!is_reasoning_model("deepseek-v3.2-exp"));
+        assert!(!is_reasoning_model("qwen3-coder-plus"));
+        assert!(!is_reasoning_model("llama3.1:8b"));
+        assert!(!is_reasoning_model("command-r-plus"));
+    }
+
+    #[test]
+    fn reasoning_delta_falls_back_when_earlier_key_is_null() {
+        let (sink, _buf) = sink_capture();
+        let mut content = String::new();
+        let mut reasoning = String::new();
+        let mut usage: Option<TokenUsage> = None;
+        let mut tools = ToolAccumulator::default();
+
+        // 供应商同时下发 reasoning_content: null 与 reasoning 时，
+        // get().or_else(get()) 串接会在第一个键上短路，整段思考被丢弃
+        handle_openai_line(
+            r#"data: {"choices":[{"delta":{"reasoning_content":null,"reasoning":"深层思考"}}]}"#,
+            &mut content, &mut reasoning, &mut usage, &mut tools, &sink,
+        );
+        handle_openai_line(
+            r#"data: {"choices":[{"delta":{"reasoning_content":null,"reasoning":null,"thought":"再想想"}}]}"#,
+            &mut content, &mut reasoning, &mut usage, &mut tools, &sink,
+        );
+
+        assert_eq!(reasoning, "深层思考再想想");
+        assert_eq!(content, "");
+    }
 }
