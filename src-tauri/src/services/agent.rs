@@ -148,7 +148,7 @@ async fn execute_tool(
         .unwrap_or("");
     // 鲁棒路径清洗：去掉两端引号、反斜杠转正斜杠、剥离前导 ./ 或 /
     let path = raw_path
-        .trim_matches(|c| c == ''' || c == '"' || c == '`')
+        .trim_matches(|c| c == '\'' || c == '"' || c == '`')
         .replace('\\', "/")
         .trim_start_matches("./")
         .trim_start_matches('/')

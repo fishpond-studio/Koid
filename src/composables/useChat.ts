@@ -57,6 +57,21 @@ function scheduleFlush() {
   if (!flushRaf) flushRaf = requestAnimationFrame(flushBuffer)
 }
 
+/**
+ * `<think>` 救援：部分模型（DeepSeek-R1 / Ollama 等）把思维链直接写在正文里。
+ * 标签会被流式增量切成两半（`<thi` + `nk>`），所以必须按状态机跨 chunk 扫描。
+ */
+const THINK_OPEN = '<think>'
+const THINK_CLOSE = '</think>'
+
+/** s 尾部与 tag 前缀的最长重合长度（不含完整 tag），据此判断是否要等下一个增量 */
+function partialTagTail(s: string, tag: string): number {
+  for (let n = Math.min(s.length, tag.length - 1); n > 0; n--) {
+    if (s.endsWith(tag.slice(0, n))) return n
+  }
+  return 0
+}
+
 /** request id 生成：crypto.randomUUID 兜底（file:// 协议极端情况下可能不可用） */
 function newRequestId(): string {
   if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
@@ -259,38 +274,40 @@ export function useChat() {
 
     // 4) 监听增量事件（以 requestId 过滤，防止串流）
     let inThinkTag = false
+    let thinkPending = ""
 
     unlisten = await listen<ChatChunk>('chat:chunk', (event) => {
       const c = event.payload
       if (c.requestId !== rid) return
       if (!c.done) {
         if (streaming.value) {
-          let deltaText = c.delta || ""
-          let reasoningText = c.reasoningDelta || ""
+          let text = thinkPending + (c.delta || "")
+          thinkPending = ""
 
-          // 救援部分模型将思考文本塞在 <think>...</think> 标签里的情况 (如 DeepSeek-R1 / Ollama)
-          if (deltaText.includes("<think>")) {
-            inThinkTag = true
-            const parts = deltaText.split("<think>")
-            deltaText = parts[0]
-            reasoningText += parts[1] || ""
+          // 救援部分模型将思考文本塞在标签里的情况 (如 DeepSeek-R1 / Ollama)
+          // 逐段扫描所有完整标签，多段交替时不丢正文
+          let deltaText = ""
+          let rescued = ""
+          let tag = inThinkTag ? THINK_CLOSE : THINK_OPEN
+          for (;;) {
+            const at = text.indexOf(tag)
+            if (at < 0) break
+            if (inThinkTag) rescued += text.slice(0, at)
+            else deltaText += text.slice(0, at)
+            text = text.slice(at + tag.length)
+            inThinkTag = !inThinkTag
+            tag = inThinkTag ? THINK_CLOSE : THINK_OPEN
           }
-          if (inThinkTag) {
-            if (reasoningText.includes("</think>")) {
-              inThinkTag = false
-              const parts = reasoningText.split("</think>")
-              reasoningText = parts[0]
-              deltaText += parts[1] || ""
-            } else if (deltaText.includes("</think>")) {
-              inThinkTag = false
-              const parts = deltaText.split("</think>")
-              reasoningText += parts[0]
-              deltaText += parts[1] || ""
-            } else {
-              reasoningText += deltaText
-              deltaText = ""
-            }
+          // 尾部可能是被切断的标签，留到下一个增量再判定
+          const hold = partialTagTail(text, tag)
+          if (hold > 0) {
+            thinkPending = text.slice(text.length - hold)
+            text = text.slice(0, text.length - hold)
           }
+          if (inThinkTag) rescued += text
+          else deltaText += text
+
+          const reasoningText = (c.reasoningDelta || "") + rescued
 
           bufContent += deltaText
           if (reasoningText) {
@@ -310,6 +327,12 @@ export function useChat() {
           scheduleFlush()
         }
       } else {
+        // 暂存的前缀最终没凑成完整标签，按当前归属补回，避免吞字
+        if (thinkPending) {
+          if (inThinkTag) bufReasoning += thinkPending
+          else bufContent += thinkPending
+          thinkPending = ""
+        }
         // 完成前先同步刷掉残留缓冲，保证落库内容完整
         flushBuffer()
         void finish(c)
