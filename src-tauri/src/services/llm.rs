@@ -81,20 +81,33 @@ fn classify_status(status: StatusCode, body: &str) -> String {
 
 // ---------- 请求构造 ----------
 
+fn is_reasoning_model(model: &str) -> bool {
+    let m = model.to_lowercase();
+    m.starts_with("o1")
+        || m.starts_with("o3")
+        || m.contains("reasoner")
+        || m.contains("deepseek-r1")
+        || m.contains("r1")
+}
+
 fn build_openai_request(
     ctx: &LlmContext,
     req: &ChatRequest,
     client: &reqwest::Client,
 ) -> reqwest::RequestBuilder {
-    // system 提示词置顶为 system 消息（内部格式统一为 OpenAI 风格）
+    let is_reasoning = is_reasoning_model(&req.model_id);
+    let system_role = if is_reasoning { "developer" } else { "system" };
+
+    // system 提示词置顶为 system/developer 消息
     let mut messages: Vec<Value> = Vec::new();
     if let Some(sys) = &req.system {
         if !sys.trim().is_empty() {
-            messages.push(json!({ "role": "system", "content": sys }));
+            messages.push(json!({ "role": system_role, "content": sys }));
         }
     }
     for m in &req.messages {
-        let mut msg = json!({ "role": m.role, "content": m.content });
+        let role = if is_reasoning && m.role == "system" { "developer" } else { m.role.as_str() };
+        let mut msg = json!({ "role": role, "content": m.content });
         if let Some(tc) = &m.tool_calls {
             msg["tool_calls"] = tc.clone();
         }
@@ -109,11 +122,15 @@ fn build_openai_request(
         "messages": messages,
         "stream": req.stream,
     });
-    if let Some(t) = req.temperature {
-        body["temperature"] = json!(t);
-    }
-    if let Some(p) = req.top_p {
-        body["top_p"] = json!(p);
+
+    // 推理模型官方禁止传入自定义 temperature 与 top_p，避免 400 报错
+    if !is_reasoning {
+        if let Some(t) = req.temperature {
+            body["temperature"] = json!(t);
+        }
+        if let Some(p) = req.top_p {
+            body["top_p"] = json!(p);
+        }
     }
     if let Some(m) = req.max_tokens {
         body["max_tokens"] = json!(m);
@@ -562,8 +579,14 @@ pub(crate) fn handle_openai_line(
                 sink(c, None);
             }
         }
-        // 部分供应商以 reasoning_content 返回思考过程（§4.10）
-        if let Some(r) = delta.get("reasoning_content").and_then(Value::as_str) {
+        // 兼容多供应商思考过程字段：reasoning_content / reasoning / thought
+        let reasoning_val = delta
+            .get("reasoning_content")
+            .or_else(|| delta.get("reasoning"))
+            .or_else(|| delta.get("thought"))
+            .and_then(Value::as_str);
+
+        if let Some(r) = reasoning_val {
             if !r.is_empty() {
                 reasoning.push_str(r);
                 sink("", Some(r));

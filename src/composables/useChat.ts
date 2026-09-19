@@ -163,7 +163,7 @@ export function useChat() {
      * assistant(最终回答) 三段，模型才能"记得"自己读过/改过什么。
      * 超长工具结果截断，防止上下文爆炸。
      */
-    const TOOL_RESULT_MAX = 6000
+    const TOOL_RESULT_MAX = 12000
     const clip = (s: string) =>
       s.length > TOOL_RESULT_MAX
         ? s.slice(0, TOOL_RESULT_MAX) + `\n…[结果过长已截断，原长 ${s.length} 字符]`
@@ -258,14 +258,43 @@ export function useChat() {
     }
 
     // 4) 监听增量事件（以 requestId 过滤，防止串流）
+    let inThinkTag = false
+
     unlisten = await listen<ChatChunk>('chat:chunk', (event) => {
       const c = event.payload
       if (c.requestId !== rid) return
       if (!c.done) {
         if (streaming.value) {
-          bufContent += c.delta
-          if (c.reasoningDelta) {
-            bufReasoning += c.reasoningDelta
+          let deltaText = c.delta || ""
+          let reasoningText = c.reasoningDelta || ""
+
+          // 救援部分模型将思考文本塞在 <think>...</think> 标签里的情况 (如 DeepSeek-R1 / Ollama)
+          if (deltaText.includes("<think>")) {
+            inThinkTag = true
+            const parts = deltaText.split("<think>")
+            deltaText = parts[0]
+            reasoningText += parts[1] || ""
+          }
+          if (inThinkTag) {
+            if (reasoningText.includes("</think>")) {
+              inThinkTag = false
+              const parts = reasoningText.split("</think>")
+              reasoningText = parts[0]
+              deltaText += parts[1] || ""
+            } else if (deltaText.includes("</think>")) {
+              inThinkTag = false
+              const parts = deltaText.split("</think>")
+              reasoningText += parts[0]
+              deltaText += parts[1] || ""
+            } else {
+              reasoningText += deltaText
+              deltaText = ""
+            }
+          }
+
+          bufContent += deltaText
+          if (reasoningText) {
+            bufReasoning += reasoningText
             // 首个思考增量到达时启动计时
             if (reasoningStartedAt === null) {
               reasoningStartedAt = Date.now()

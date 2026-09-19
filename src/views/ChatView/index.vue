@@ -326,8 +326,8 @@ function onKeydown(e: KeyboardEvent) {
       return
     }
   }
-  // Enter 发送 / Shift+Enter 换行（§4.10）
-  if (e.key === 'Enter' && !e.shiftKey) {
+  // Enter 发送 / Shift+Enter 换行（安全校验输入法 composition 状态）
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229) {
     e.preventDefault()
     void submit()
   }
@@ -373,12 +373,14 @@ watch(draft, (v) => {
 
 // ---------- 滚动跟随 ----------
 
+let userInterruptedScroll = false
+
 function scrollToBottom(force = false) {
   const el = scroller.value
   if (!el) return
-  if (force || stickToBottom) {
+  if (force || (!userInterruptedScroll && stickToBottom)) {
     void nextTick(() => {
-      el.scrollTop = el.scrollHeight
+      el.scrollTo({ top: el.scrollHeight, behavior: force ? "auto" : "smooth" })
     })
   }
 }
@@ -386,7 +388,10 @@ function scrollToBottom(force = false) {
 function onScroll() {
   const el = scroller.value
   if (!el) return
-  stickToBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80
+  const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight
+  stickToBottom = distanceFromBottom < 60
+  // 用户向上滚动超过 80px 时判定为主动阅读，暂停流式吸底
+  userInterruptedScroll = distanceFromBottom > 80
 }
 
 watch(() => sessions.messages.length, () => scrollToBottom())
