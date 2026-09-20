@@ -57,6 +57,21 @@ function scheduleFlush() {
   if (!flushRaf) flushRaf = requestAnimationFrame(flushBuffer)
 }
 
+/**
+ * `<think>` 救援：部分模型（DeepSeek-R1 / Ollama 等）把思维链直接写在正文里。
+ * 标签会被流式增量切成两半（`<thi` + `nk>`），所以必须按状态机跨 chunk 扫描。
+ */
+const THINK_OPEN = '<think>'
+const THINK_CLOSE = '</think>'
+
+/** s 尾部与 tag 前缀的最长重合长度（不含完整 tag），据此判断是否要等下一个增量 */
+function partialTagTail(s: string, tag: string): number {
+  for (let n = Math.min(s.length, tag.length - 1); n > 0; n--) {
+    if (s.endsWith(tag.slice(0, n))) return n
+  }
+  return 0
+}
+
 /** request id 生成：crypto.randomUUID 兜底（file:// 协议极端情况下可能不可用） */
 function newRequestId(): string {
   if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
@@ -163,11 +178,48 @@ export function useChat() {
      * assistant(最终回答) 三段，模型才能"记得"自己读过/改过什么。
      * 超长工具结果截断，防止上下文爆炸。
      */
-    const TOOL_RESULT_MAX = 6000
-    const clip = (s: string) =>
-      s.length > TOOL_RESULT_MAX
-        ? s.slice(0, TOOL_RESULT_MAX) + `\n…[结果过长已截断，原长 ${s.length} 字符]`
-        : s
+    const TOOL_RESULT_MAX = 12000
+    /** 全部工具结果的合计上限，按「最近的优先」分配额度 */
+    const TOOL_RESULT_TOTAL_MAX = 60000
+    const TOOL_RESULT_OMITTED =
+      '（较早的工具结果已省略以控制上下文，如需该内容请重新调用工具获取）'
+
+    /**
+     * 单条上限挡不住长会话：autoCompact 默认关闭（settings.ts），
+     * N 次工具调用就是 N×TOOL_RESULT_MAX 字符，几十个回合足以顶穿上下文窗口。
+     * 故再加一道合计上限，并倒序分配额度——模型需要的是刚读过的内容，
+     * 旧结果降级为占位提示，让它知道该重新获取而不是以为没发生过。
+     */
+    const toolBudget = new Map<string, string>()
+    const allToolResults: Array<{ id: string; text: string }> = []
+    for (const m of sessions.messages) {
+      if (m.role !== 'assistant') continue
+      const calls = m.toolCalls ?? []
+      if (calls.length === 0) continue
+      const results = m.toolResults ?? []
+      for (const c of calls) {
+        allToolResults.push({
+          id: c.id,
+          text: results.find((x) => x.toolCallId === c.id)?.content ?? '（无执行记录）',
+        })
+      }
+    }
+    let budgetRemaining = TOOL_RESULT_TOTAL_MAX
+    for (let i = allToolResults.length - 1; i >= 0; i--) {
+      const { id, text } = allToolResults[i]
+      if (budgetRemaining <= 0) {
+        toolBudget.set(id, TOOL_RESULT_OMITTED)
+        continue
+      }
+      const cap = Math.min(TOOL_RESULT_MAX, budgetRemaining)
+      toolBudget.set(
+        id,
+        text.length > cap
+          ? `${text.slice(0, cap)}\n…[结果已截断，原长 ${text.length} 字符]`
+          : text,
+      )
+      budgetRemaining -= Math.min(text.length, cap)
+    }
 
     const history: ChatMessage[] = []
     for (const m of sessions.messages) {
@@ -191,13 +243,11 @@ export function useChat() {
           function: { name: c.name, arguments: c.arguments },
         })),
       } as ChatMessage)
-      // 每个调用对应一条 tool 结果
-      const results = m.toolResults ?? []
+      // 每个调用对应一条 tool 结果（额度已在上面按「最近优先」预分配）
       for (const c of calls) {
-        const r = results.find((x) => x.toolCallId === c.id)
         history.push({
           role: 'tool',
-          content: clip(r?.content ?? '（无执行记录）'),
+          content: toolBudget.get(c.id) ?? TOOL_RESULT_OMITTED,
           toolCallId: c.id,
           toolName: c.name,
         } as ChatMessage)
@@ -258,14 +308,45 @@ export function useChat() {
     }
 
     // 4) 监听增量事件（以 requestId 过滤，防止串流）
+    let inThinkTag = false
+    let thinkPending = ""
+
     unlisten = await listen<ChatChunk>('chat:chunk', (event) => {
       const c = event.payload
       if (c.requestId !== rid) return
       if (!c.done) {
         if (streaming.value) {
-          bufContent += c.delta
-          if (c.reasoningDelta) {
-            bufReasoning += c.reasoningDelta
+          let text = thinkPending + (c.delta || "")
+          thinkPending = ""
+
+          // 救援部分模型将思考文本塞在标签里的情况 (如 DeepSeek-R1 / Ollama)
+          // 逐段扫描所有完整标签，多段交替时不丢正文
+          let deltaText = ""
+          let rescued = ""
+          let tag = inThinkTag ? THINK_CLOSE : THINK_OPEN
+          for (;;) {
+            const at = text.indexOf(tag)
+            if (at < 0) break
+            if (inThinkTag) rescued += text.slice(0, at)
+            else deltaText += text.slice(0, at)
+            text = text.slice(at + tag.length)
+            inThinkTag = !inThinkTag
+            tag = inThinkTag ? THINK_CLOSE : THINK_OPEN
+          }
+          // 尾部可能是被切断的标签，留到下一个增量再判定
+          const hold = partialTagTail(text, tag)
+          if (hold > 0) {
+            thinkPending = text.slice(text.length - hold)
+            text = text.slice(0, text.length - hold)
+          }
+          if (inThinkTag) rescued += text
+          else deltaText += text
+
+          const reasoningText = (c.reasoningDelta || "") + rescued
+
+          bufContent += deltaText
+          if (reasoningText) {
+            bufReasoning += reasoningText
             // 首个思考增量到达时启动计时
             if (reasoningStartedAt === null) {
               reasoningStartedAt = Date.now()
@@ -281,6 +362,12 @@ export function useChat() {
           scheduleFlush()
         }
       } else {
+        // 暂存的前缀最终没凑成完整标签，按当前归属补回，避免吞字
+        if (thinkPending) {
+          if (inThinkTag) bufReasoning += thinkPending
+          else bufContent += thinkPending
+          thinkPending = ""
+        }
         // 完成前先同步刷掉残留缓冲，保证落库内容完整
         flushBuffer()
         void finish(c)

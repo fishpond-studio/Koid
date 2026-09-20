@@ -130,6 +130,9 @@ async function submit() {
   if (!text.trim() || sending.value) return
   draft.value = ''
   resetHeight()
+  // 发送即回到底部：否则用户正在翻阅历史时发消息，视图不会跟到自己的新消息
+  stickToBottom = true
+  scrollToBottom({ force: true, smooth: true })
   try {
     await ensureSession()
     // 自动总结上下文：开关开启且占用超阈值时先压缩再发送
@@ -326,8 +329,8 @@ function onKeydown(e: KeyboardEvent) {
       return
     }
   }
-  // Enter 发送 / Shift+Enter 换行（§4.10）
-  if (e.key === 'Enter' && !e.shiftKey) {
+  // Enter 发送 / Shift+Enter 换行（安全校验输入法 composition 状态）
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229) {
     e.preventDefault()
     void submit()
   }
@@ -373,26 +376,83 @@ watch(draft, (v) => {
 
 // ---------- 滚动跟随 ----------
 
-function scrollToBottom(force = false) {
+/** 距底小于此值视为贴底（跟随中） */
+const STICK_BOTTOM_PX = 80
+/** 距底小于此值视为已落位到底 */
+const AT_BOTTOM_PX = 2
+
+/**
+ * 最近一次「确定由用户发起」的滚动时刻。
+ *
+ * 程序化 scrollTo 同样会触发 scroll 事件，若直接拿滚动位置判断用户意图，
+ * 自动吸底会把自己的动画误判成用户上滚，把跟随永久关掉——这是原实现的锁死成因。
+ */
+let lastUserScrollAt = 0
+let pointerHeld = false
+let pointerDragged = false
+let pointerDownX = 0
+let pointerDownY = 0
+
+function onUserScrollInput() {
+  lastUserScrollAt = Date.now()
+}
+
+function onScrollerPointerDown(e: PointerEvent) {
+  pointerHeld = true
+  pointerDragged = false
+  pointerDownX = e.clientX
+  pointerDownY = e.clientY
+}
+
+function onScrollerPointerMove(e: PointerEvent) {
+  // 需要位移阈值，否则点一下代码块复制按钮也会被当成拖滚动条
+  if (!pointerHeld) return
+  if (Math.abs(e.clientX - pointerDownX) > 3 || Math.abs(e.clientY - pointerDownY) > 3) {
+    pointerDragged = true
+    onUserScrollInput()
+  }
+}
+
+function onScrollerPointerUp() {
+  pointerHeld = false
+  pointerDragged = false
+}
+
+function isUserScrolling() {
+  return pointerDragged || Date.now() - lastUserScrollAt < 200
+}
+
+/**
+ * force：无视贴底状态强制跳底。smooth：仅用于离散跳转（切会话、发消息）。
+ * 流式增量必须走 auto——逐帧 smooth 会不断重启动画，既卡顿又拉长误判窗口。
+ */
+function scrollToBottom(opts: { force?: boolean; smooth?: boolean } = {}) {
   const el = scroller.value
   if (!el) return
-  if (force || stickToBottom) {
-    void nextTick(() => {
-      el.scrollTop = el.scrollHeight
-    })
-  }
+  if (!opts.force && !stickToBottom) return
+  void nextTick(() => {
+    el.scrollTo({ top: el.scrollHeight, behavior: opts.smooth ? "smooth" : "auto" })
+  })
 }
 
 function onScroll() {
   const el = scroller.value
   if (!el) return
-  stickToBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80
+  const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight
+  if (isUserScrolling()) {
+    // 用户主导：上滚即停止跟随，滚回底部即恢复
+    stickToBottom = distanceFromBottom < STICK_BOTTOM_PX
+  } else if (distanceFromBottom < AT_BOTTOM_PX) {
+    // 程序化滚动已落位，确认继续跟随
+    stickToBottom = true
+  }
+  // 其余情形（程序化滚动途中）不改写跟随意图
 }
 
-watch(() => sessions.messages.length, () => scrollToBottom())
+watch(() => sessions.messages.length, () => scrollToBottom({ smooth: true }))
 watch(() => sessions.currentId, () => {
   stickToBottom = true
-  scrollToBottom(true)
+  scrollToBottom({ force: true })
 })
 watch(
   () => streaming.value?.content.length ?? 0,
@@ -698,7 +758,18 @@ const showWelcome = computed(
     </header>
 
     <!-- 消息区 -->
-    <div ref="scroller" class="scrollbar-thin flex-1 overflow-y-auto" @scroll="onScroll">
+    <div
+      ref="scroller"
+      class="scrollbar-thin flex-1 overflow-y-auto"
+      @scroll="onScroll"
+      @wheel.passive="onUserScrollInput"
+      @touchmove.passive="onUserScrollInput"
+      @pointerdown="onScrollerPointerDown"
+      @pointermove.passive="onScrollerPointerMove"
+      @pointerup="onScrollerPointerUp"
+      @pointercancel="onScrollerPointerUp"
+      @pointerleave="onScrollerPointerUp"
+    >
       <div class="mx-auto flex max-w-3xl flex-col gap-4 p-4">
         <!-- 空状态欢迎页（未选工作区时即为工作区门禁，对齐 dsh hero） -->
         <div v-if="showWelcome" class="relative flex flex-col items-center gap-3 py-16">

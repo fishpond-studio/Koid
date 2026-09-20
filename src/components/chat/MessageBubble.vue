@@ -74,7 +74,7 @@ const latencyText = computed(() => {
       </button>
     </div>
     <div
-      class="max-w-[85%] whitespace-pre-wrap break-words rounded-2xl rounded-br-md bg-primary px-4 py-2.5 text-primary-foreground"
+      class="max-w-[85%] whitespace-pre-wrap break-words rounded-2xl rounded-br-sm bg-primary px-4 py-2.5 text-primary-foreground shadow-sm shadow-primary/20"
     >
       {{ message.content }}
     </div>
@@ -83,16 +83,16 @@ const latencyText = computed(() => {
   <!-- assistant 消息 -->
   <div v-else :data-mid="message.id" class="group flex flex-col">
     <div class="max-w-full rounded-2xl bg-muted px-4 py-3">
-      <!-- 思考过程：默认折叠（§4.10 Thinking） -->
-      <details v-if="message.reasoning" class="mb-2">
+      <!-- 思考过程：折叠卡片与呼吸微光 -->
+      <details v-if="message.reasoning" class="mb-3 rounded-lg border border-border/50 bg-background/50 p-2.5 transition-colors">
         <summary
-          class="flex w-fit cursor-pointer select-none items-center gap-1.5 text-xs text-muted-foreground transition-colors hover:text-foreground"
+          class="flex w-fit cursor-pointer select-none items-center gap-1.5 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
         >
-          <Brain class="size-3.5" />
-          {{ t('chat.message.reasoning') }}
+          <Brain class="size-3.5 text-primary/80" />
+          <span>{{ t('chat.message.reasoning') }}</span>
         </summary>
         <div
-          class="mt-2 whitespace-pre-wrap border-l-2 border-border pl-3 text-sm italic text-muted-foreground"
+          class="mt-2.5 whitespace-pre-wrap border-l-2 border-primary/40 pl-3 text-xs leading-relaxed text-muted-foreground/90 font-mono select-text"
         >
           {{ message.reasoning }}
         </div>

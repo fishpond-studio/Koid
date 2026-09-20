@@ -81,20 +81,73 @@ fn classify_status(status: StatusCode, body: &str) -> String {
 
 // ---------- 请求构造 ----------
 
+/// 是否 OpenAI 官方端点。
+///
+/// 推理模型的那套特殊参数形态（developer 角色、禁 temperature/top_p、
+/// max_completion_tokens）只有 OpenAI 官方认。DeepSeek、Ollama、vLLM 与各类中转
+/// 走的是同一个 build_openai_request，却大多只接受 system + max_tokens，
+/// 按模型名一刀切反而会替它们造出 400，所以必须按端点门控。
+fn is_openai_official(base_url: &str) -> bool {
+    let lowered = base_url.to_lowercase();
+    let after_scheme = lowered.split("://").nth(1).unwrap_or(&lowered);
+    let authority = after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("")
+        // 去掉 user:pass@ 前缀
+        .rsplit('@')
+        .next()
+        .unwrap_or("");
+    // 去掉 :port（IPv6 字面量在此会解析失败，但那种情况本就不是官方端点，返回 false 即回退到安全行为）
+    let host = match authority.split_once(':') {
+        Some((h, _)) => h,
+        None => authority,
+    };
+    host == "api.openai.com"
+}
+
+/// 是否推理模型。仅用于 OpenAI 官方端点的参数形态判定，见 [`is_openai_official`]。
+fn is_reasoning_model(model: &str) -> bool {
+    let lowered = model.to_lowercase();
+    // 剥掉 "openai/" 之类的供应商前缀与 ":latest" 之类的 tag，只看模型名本体，
+    // 否则带前缀的 id（openai/o1-mini）会漏判
+    let after_slash = lowered.rsplit('/').next().unwrap_or(&lowered);
+    let name = after_slash.split(':').next().unwrap_or(after_slash);
+    // 切词后整词比对：裸 contains("r1") 会命中大量无关名字
+    let words: Vec<&str> = name
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let word = |w: &str| words.iter().any(|x| *x == w);
+    name.starts_with("o1")
+        || name.starts_with("o3")
+        || name.starts_with("o4")
+        || name.starts_with("gpt-5")
+        || word("r1")
+        || word("reasoner")
+        || word("reasoning")
+        || word("thinking")
+        || word("qwq")
+}
+
 fn build_openai_request(
     ctx: &LlmContext,
     req: &ChatRequest,
     client: &reqwest::Client,
 ) -> reqwest::RequestBuilder {
-    // system 提示词置顶为 system 消息（内部格式统一为 OpenAI 风格）
+    let reasoning = is_openai_official(&ctx.provider.base_url) && is_reasoning_model(&req.model_id);
+    let system_role = if reasoning { "developer" } else { "system" };
+
+    // system 提示词置顶为 system/developer 消息
     let mut messages: Vec<Value> = Vec::new();
     if let Some(sys) = &req.system {
         if !sys.trim().is_empty() {
-            messages.push(json!({ "role": "system", "content": sys }));
+            messages.push(json!({ "role": system_role, "content": sys }));
         }
     }
     for m in &req.messages {
-        let mut msg = json!({ "role": m.role, "content": m.content });
+        let role = if reasoning && m.role == "system" { "developer" } else { m.role.as_str() };
+        let mut msg = json!({ "role": role, "content": m.content });
         if let Some(tc) = &m.tool_calls {
             msg["tool_calls"] = tc.clone();
         }
@@ -109,14 +162,22 @@ fn build_openai_request(
         "messages": messages,
         "stream": req.stream,
     });
-    if let Some(t) = req.temperature {
-        body["temperature"] = json!(t);
-    }
-    if let Some(p) = req.top_p {
-        body["top_p"] = json!(p);
+
+    // OpenAI 官方推理模型禁止自定义 temperature 与 top_p，否则 400；
+    // 其余端点（含 DeepSeek-R1，其官方推荐 temperature=0.6）照常下发
+    if !reasoning {
+        if let Some(t) = req.temperature {
+            body["temperature"] = json!(t);
+        }
+        if let Some(p) = req.top_p {
+            body["top_p"] = json!(p);
+        }
     }
     if let Some(m) = req.max_tokens {
-        body["max_tokens"] = json!(m);
+        // OpenAI 推理模型同样拒绝 max_tokens，要求 max_completion_tokens；
+        // 只剥 temperature/top_p 而不改名，o 系仍会 400
+        let key = if reasoning { "max_completion_tokens" } else { "max_tokens" };
+        body[key] = json!(m);
     }
     // 思考强度（OpenAI o 系/gpt-5 reasoning_effort；"default" 与 None 均不下发）。
     // "max" 映射为 xhigh——仅部分新模型支持，不支持者返回 BAD_REQUEST 时用户可降档。
@@ -562,12 +623,15 @@ pub(crate) fn handle_openai_line(
                 sink(c, None);
             }
         }
-        // 部分供应商以 reasoning_content 返回思考过程（§4.10）
-        if let Some(r) = delta.get("reasoning_content").and_then(Value::as_str) {
-            if !r.is_empty() {
-                reasoning.push_str(r);
-                sink("", Some(r));
-            }
+        // 兼容多供应商思考过程字段：reasoning_content / reasoning / thought
+        // 不能串 get().or_else(get())：某字段存在但值为 null 时 or_else 不再回退，思考内容会被丢弃
+        let reasoning_val = ["reasoning_content", "reasoning", "thought"]
+            .into_iter()
+            .find_map(|k| delta.get(k).and_then(Value::as_str).filter(|s| !s.is_empty()));
+
+        if let Some(r) = reasoning_val {
+            reasoning.push_str(r);
+            sink("", Some(r));
         }
         // 工具调用增量（agent 循环）
         tools.apply_openai_delta(delta);
@@ -869,5 +933,67 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].name, "list_dir");
         assert_eq!(calls[0].arguments, r#"{"path":"src"}"#);
+    }
+
+    #[test]
+    fn openai_official_detection_only_matches_api_openai_com_host() {
+        // 官方端点：带不带 /v1、带不带端口、带不带 scheme 都要认出来
+        assert!(is_openai_official("https://api.openai.com/v1"));
+        assert!(is_openai_official("https://api.openai.com"));
+        assert!(is_openai_official("https://api.openai.com:443/v1"));
+        assert!(is_openai_official("api.openai.com/v1"));
+        // 兼容端点只认 system + max_tokens，误判成官方会替它们造出 400
+        assert!(!is_openai_official("https://api.deepseek.com/v1"));
+        assert!(!is_openai_official("http://localhost:11434/v1"));
+        assert!(!is_openai_official("https://openrouter.ai/api/v1"));
+        assert!(!is_openai_official("https://xxx.openai.azure.com"));
+        // 子域名与形近域名不能命中
+        assert!(!is_openai_official("https://not-api.openai.com/v1"));
+        assert!(!is_openai_official("https://api.openai.com.evil.example/v1"));
+    }
+
+    #[test]
+    fn reasoning_model_detection_strips_prefix_and_matches_whole_words() {
+        // 带供应商前缀或 Ollama tag 时不能漏判
+        assert!(is_reasoning_model("o1"));
+        assert!(is_reasoning_model("openai/o1-mini"));
+        assert!(is_reasoning_model("o3-mini"));
+        assert!(is_reasoning_model("o4-mini"));
+        assert!(is_reasoning_model("gpt-5"));
+        assert!(is_reasoning_model("deepseek-ai/DeepSeek-R1-0528:latest"));
+        assert!(is_reasoning_model("deepseek-reasoner"));
+        assert!(is_reasoning_model("qwq-32b"));
+        assert!(is_reasoning_model("phi-4-reasoning"));
+        // 非推理模型
+        assert!(!is_reasoning_model("gpt-4o"));
+        assert!(!is_reasoning_model("gpt-4.1-mini"));
+        assert!(!is_reasoning_model("deepseek-chat"));
+        assert!(!is_reasoning_model("deepseek-v3.2-exp"));
+        assert!(!is_reasoning_model("qwen3-coder-plus"));
+        assert!(!is_reasoning_model("llama3.1:8b"));
+        assert!(!is_reasoning_model("command-r-plus"));
+    }
+
+    #[test]
+    fn reasoning_delta_falls_back_when_earlier_key_is_null() {
+        let (sink, _buf) = sink_capture();
+        let mut content = String::new();
+        let mut reasoning = String::new();
+        let mut usage: Option<TokenUsage> = None;
+        let mut tools = ToolAccumulator::default();
+
+        // 供应商同时下发 reasoning_content: null 与 reasoning 时，
+        // get().or_else(get()) 串接会在第一个键上短路，整段思考被丢弃
+        handle_openai_line(
+            r#"data: {"choices":[{"delta":{"reasoning_content":null,"reasoning":"深层思考"}}]}"#,
+            &mut content, &mut reasoning, &mut usage, &mut tools, &sink,
+        );
+        handle_openai_line(
+            r#"data: {"choices":[{"delta":{"reasoning_content":null,"reasoning":null,"thought":"再想想"}}]}"#,
+            &mut content, &mut reasoning, &mut usage, &mut tools, &sink,
+        );
+
+        assert_eq!(reasoning, "深层思考再想想");
+        assert_eq!(content, "");
     }
 }
