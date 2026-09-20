@@ -49,6 +49,15 @@ fn openai_chat_url(base: &str) -> String {
     }
 }
 
+fn openai_responses_url(base: &str) -> String {
+    let b = base.trim_end_matches('/');
+    if b.ends_with("/v1") {
+        format!("{b}/responses")
+    } else {
+        format!("{b}/v1/responses")
+    }
+}
+
 fn anthropic_url(base: &str) -> String {
     let b = base.trim_end_matches('/');
     if b.ends_with("/v1") {
@@ -373,15 +382,92 @@ pub async fn execute(
     let (ptype, purl) = resolve_proxy(&ctx.provider, ctx.global_proxy.as_ref());
     let client = build_client(ptype, purl.as_deref(), timeout_secs, req.stream)?;
 
+/// OpenAI Response API (/v1/responses) 请求构造
+fn build_openai_response_request(
+    ctx: &LlmContext,
+    req: &ChatRequest,
+    client: &reqwest::Client,
+) -> reqwest::RequestBuilder {
+    // 构造 input (支持 system / user / assistant / tool 块)
+    let mut input: Vec<Value> = Vec::new();
+    if let Some(sys) = &req.system {
+        if !sys.trim().is_empty() {
+            input.push(json!({ "role": "system", "content": sys }));
+        }
+    }
+    for m in &req.messages {
+        let mut msg = json!({ "role": m.role, "content": m.content });
+        if let Some(tc) = &m.tool_calls {
+            msg["tool_calls"] = tc.clone();
+        }
+        if let Some(id) = &m.tool_call_id {
+            msg["tool_call_id"] = json!(id);
+        }
+        input.push(msg);
+    }
+
+    let mut body = json!({
+        "model": req.model_id,
+        "input": input,
+        "stream": req.stream,
+    });
+
+    let is_reasoning = is_reasoning_model(&req.model_id);
+    if !is_reasoning {
+        if let Some(t) = req.temperature {
+            body["temperature"] = json!(t);
+        }
+        if let Some(p) = req.top_p {
+            body["top_p"] = json!(p);
+        }
+    }
+
+    if let Some(m) = req.max_tokens {
+        body["max_output_tokens"] = json!(m);
+    }
+
+    // reasoning effort
+    let effort = match req.thinking_level.as_deref() {
+        Some("low") => Some("low"),
+        Some("medium") => Some("medium"),
+        Some("high") => Some("high"),
+        Some("max") => Some("xhigh"),
+        _ => None,
+    };
+    if let Some(effort) = effort {
+        body["reasoning"] = json!({ "effort": effort });
+    }
+
+    // 工具定义转换为 Response API 格式
+    if let Some(tools) = &req.tools {
+        let tool_defs: Vec<Value> = tools
+            .iter()
+            .map(|t| {
+                json!({
+                    "type": "function",
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": t.parameters,
+                })
+            })
+            .collect();
+        body["tools"] = json!(tool_defs);
+    }
+
+    let mut builder = client
+        .post(openai_responses_url(&ctx.provider.base_url))
+        .json(&body);
+    if let Some(key) = &ctx.api_key {
+        builder = builder.bearer_auth(key);
+    }
+    builder
+}
     let builder = match ctx.provider.provider_type {
         ProviderType::OpenAiCompatible
         | ProviderType::Ollama
         | ProviderType::Custom => build_openai_request(&ctx, &req, &client),
         ProviderType::Anthropic => build_anthropic_request(&ctx, &req, &client),
-        // OpenAI Response API 转换在 Phase 2 引入
-        ProviderType::OpenAiResponse => {
-            return Err(err("UNSUPPORTED", "openai-response 格式将在 Phase 2 支持"));
-        }
+        ProviderType::OpenAiResponse => build_openai_response_request(&ctx, &req, &client),
     };
 
     let request = builder
@@ -406,13 +492,13 @@ pub async fn execute(
         return Err(classify_status(status, &body));
     }
 
-    let is_anthropic = ctx.provider.provider_type == ProviderType::Anthropic;
+    let p_type = ctx.provider.provider_type;
     let provider_name = ctx.provider.name.clone();
 
     let (content, reasoning, usage, tool_calls) = if req.stream {
-        stream_body(&ctx, resp, is_anthropic, timeout_secs, sink).await?
+        stream_body(&ctx, resp, p_type, timeout_secs, sink).await?
     } else {
-        full_body(&ctx, resp, is_anthropic).await?
+        full_body(&ctx, resp, p_type).await?
     };
 
     // 空响应作为可转移故障类型（§4.3 trigger: empty-response）
@@ -531,7 +617,7 @@ impl ToolAccumulator {
 async fn stream_body(
     ctx: &LlmContext,
     resp: reqwest::Response,
-    is_anthropic: bool,
+    provider_type: ProviderType,
     idle_secs: u64,
     sink: &DeltaSink,
 ) -> Result<(String, Option<String>, Option<TokenUsage>, Vec<crate::models::ToolCall>), String> {
@@ -570,10 +656,16 @@ async fn stream_body(
             let line = String::from_utf8_lossy(&buf[start..end]);
             let line = line.trim();
             if !line.is_empty() {
-                if is_anthropic {
-                    handle_anthropic_line(line, &mut content, &mut reasoning, &mut usage, &mut tools, sink);
-                } else {
-                    handle_openai_line(line, &mut content, &mut reasoning, &mut usage, &mut tools, sink);
+                match provider_type {
+                    ProviderType::Anthropic => {
+                        handle_anthropic_line(line, &mut content, &mut reasoning, &mut usage, &mut tools, sink);
+                    }
+                    ProviderType::OpenAiResponse => {
+                        handle_openai_response_line(line, &mut content, &mut reasoning, &mut usage, &mut tools, sink);
+                    }
+                    _ => {
+                        handle_openai_line(line, &mut content, &mut reasoning, &mut usage, &mut tools, sink);
+                    }
                 }
             }
             start = end + 1;
@@ -718,10 +810,110 @@ pub(crate) fn handle_anthropic_line(
 
 // ---------- 非流式解析 ----------
 
+/// OpenAI Response API SSE 行处理
+pub(crate) fn handle_openai_response_line(
+    line: &str,
+    content: &mut String,
+    reasoning: &mut String,
+    usage: &mut Option<TokenUsage>,
+    tools: &mut ToolAccumulator,
+    sink: &DeltaSink,
+) {
+    let Some(data) = line.strip_prefix("data:") else {
+        return;
+    };
+    let data = data.trim();
+    if data == "[DONE]" {
+        return;
+    }
+    let Ok(v) = serde_json::from_str::<Value>(data) else {
+        return;
+    };
+
+    if let Some(u) = parse_usage(&v) {
+        *usage = Some(u);
+    }
+
+    let event_type = v.get("type").and_then(Value::as_str).unwrap_or("");
+    match event_type {
+        // 文本增量
+        "response.output_item.delta" => {
+            if let Some(delta) = v.get("delta") {
+                if let Some(t) = delta.get("text").and_then(Value::as_str) {
+                    if !t.is_empty() {
+                        content.push_str(t);
+                        sink(t, None);
+                    }
+                }
+                // 工具调用参数增量 (function_call)
+                if let Some(args) = delta.get("arguments").and_then(Value::as_str) {
+                    let item_idx = v.get("output_index").and_then(Value::as_u64).unwrap_or(0) as usize;
+                    let fake_delta = json!({
+                        "tool_calls": [{
+                            "index": item_idx,
+                            "function": { "arguments": args }
+                        }]
+                    });
+                    tools.apply_openai_delta(&fake_delta);
+                }
+            }
+        }
+        // 思考过程增量
+        "response.reasoning.delta" => {
+            if let Some(t) = v.get("delta").and_then(|d| d.get("text")).and_then(Value::as_str) {
+                if !t.is_empty() {
+                    reasoning.push_str(t);
+                    sink("", Some(t));
+                }
+            }
+        }
+        // 工具项开始 (声明函数名和 ID)
+        "response.output_item.added" => {
+            if let Some(item) = v.get("item") {
+                if item.get("type").and_then(Value::as_str) == Some("function_call") {
+                    let item_idx = v.get("output_index").and_then(Value::as_u64).unwrap_or(0) as usize;
+                    let call_id = item.get("call_id").or_else(|| item.get("id")).and_then(Value::as_str).unwrap_or("");
+                    let name = item.get("name").and_then(Value::as_str).unwrap_or("");
+                    let fake_delta = json!({
+                        "tool_calls": [{
+                            "index": item_idx,
+                            "id": call_id,
+                            "function": { "name": name, "arguments": "" }
+                        }]
+                    });
+                    tools.apply_openai_delta(&fake_delta);
+                }
+            }
+        }
+        // 兜底通用 choices/delta (有些兼容端点即便路由在 /responses 也会回普通 chunk)
+        _ => {
+            if let Some(delta) = v.pointer("/choices/0/delta") {
+                if let Some(c) = delta.get("content").and_then(Value::as_str) {
+                    if !c.is_empty() {
+                        content.push_str(c);
+                        sink(c, None);
+                    }
+                }
+                let r_val = delta
+                    .get("reasoning_content")
+                    .or_else(|| delta.get("reasoning"))
+                    .or_else(|| delta.get("thought"))
+                    .and_then(Value::as_str);
+                if let Some(r) = r_val {
+                    if !r.is_empty() {
+                        reasoning.push_str(r);
+                        sink("", Some(r));
+                    }
+                }
+                tools.apply_openai_delta(delta);
+            }
+        }
+    }
+}
 async fn full_body(
     ctx: &LlmContext,
     resp: reqwest::Response,
-    is_anthropic: bool,
+    provider_type: ProviderType,
 ) -> Result<(String, Option<String>, Option<TokenUsage>, Vec<crate::models::ToolCall>), String> {
     let _ = ctx;
     let v: Value = resp
@@ -729,7 +921,7 @@ async fn full_body(
         .await
         .map_err(|e| err("SERVER", format!("解析响应失败: {e}")))?;
 
-    if is_anthropic {
+    if provider_type == ProviderType::Anthropic {
         // content 为块数组：拼接 text 块、thinking 块归入 reasoning、tool_use 收集
         let mut content = String::new();
         let mut reasoning = String::new();
@@ -770,6 +962,41 @@ async fn full_body(
                 u
             });
         Ok((content, non_empty(reasoning), usage, tools))
+    } else if provider_type == ProviderType::OpenAiResponse {
+        let mut content = String::new();
+        let mut reasoning = String::new();
+        let mut tools: Vec<crate::models::ToolCall> = Vec::new();
+
+        if let Some(output) = v.get("output").and_then(Value::as_array) {
+            for item in output {
+                let item_type = item.get("type").and_then(Value::as_str).unwrap_or("");
+                if item_type == "message" {
+                    if let Some(parts) = item.pointer("/content").and_then(Value::as_array) {
+                        for p in parts {
+                            if p.get("type").and_then(Value::as_str) == Some("text") {
+                                if let Some(txt) = p.get("text").and_then(Value::as_str) {
+                                    content.push_str(txt);
+                                }
+                            }
+                        }
+                    }
+                } else if item_type == "function_call" {
+                    tools.push(crate::models::ToolCall {
+                        id: item.get("call_id").or_else(|| item.get("id")).and_then(Value::as_str).unwrap_or("").to_string(),
+                        name: item.get("name").and_then(Value::as_str).unwrap_or("").to_string(),
+                        arguments: item.get("arguments").and_then(Value::as_str).unwrap_or("{}").to_string(),
+                    });
+                }
+            }
+        }
+        // 如果 output 为空，尝试常规解析
+        if content.is_empty() {
+            if let Some(txt) = v.pointer("/choices/0/message/content").and_then(Value::as_str) {
+                content = txt.to_string();
+            }
+        }
+
+        Ok((content, non_empty(reasoning), parse_usage(&v), tools))
     } else {
         let content = v
             .pointer("/choices/0/message/content")
@@ -995,5 +1222,28 @@ mod tests {
 
         assert_eq!(reasoning, "深层思考再想想");
         assert_eq!(content, "");
+    }
+
+    #[test]
+    fn openai_response_api_sse_parses_delta_and_reasoning() {
+        let (sink, buf) = sink_capture();
+        let mut content = String::new();
+        let mut reasoning = String::new();
+        let mut usage: Option<TokenUsage> = None;
+        let mut tools = ToolAccumulator::default();
+
+        handle_openai_response_line(
+            r#"data: {"type":"response.reasoning.delta","delta":{"text":"思考中..."}}"#,
+            &mut content, &mut reasoning, &mut usage, &mut tools, &sink,
+        );
+        handle_openai_response_line(
+            r#"data: {"type":"response.output_item.delta","delta":{"text":"你好，世界！"}}"#,
+            &mut content, &mut reasoning, &mut usage, &mut tools, &sink,
+        );
+        handle_openai_response_line("data: [DONE]", &mut content, &mut reasoning, &mut usage, &mut tools, &sink);
+
+        assert_eq!(reasoning, "思考中...");
+        assert_eq!(content, "你好，世界！");
+        assert!(buf.lock().unwrap().contains("你好，世界！"));
     }
 }
