@@ -132,6 +132,16 @@ pub fn workspace_tools() -> Vec<ToolDef> {
     ]
 }
 
+/// 按顺序取第一个「存在且为字符串」的参数值。
+///
+/// 不能串 `get(a).or_else(|| get(b))`：a 存在但值为 null 时 or_else 不会回退，
+/// 最终会拿到空串（与 llm.rs 里 reasoning 字段同一类问题）。
+fn first_str<'a>(params: &'a Value, keys: &[&str]) -> &'a str {
+    keys.iter()
+        .find_map(|k| params.get(*k).and_then(Value::as_str))
+        .unwrap_or("")
+}
+
 /// 执行单个工具调用
 async fn execute_tool(
     state: &AppState,
@@ -140,12 +150,7 @@ async fn execute_tool(
     abort: Arc<AtomicBool>,
 ) -> ToolOutcome {
     let params: Value = serde_json::from_str(&call.arguments).unwrap_or(Value::Null);
-    let raw_path = params
-        .get("path")
-        .or_else(|| params.get("file"))
-        .or_else(|| params.get("filepath"))
-        .and_then(Value::as_str)
-        .unwrap_or("");
+    let raw_path = first_str(&params, &["path", "file", "filepath"]);
     // 鲁棒路径清洗：去掉两端引号、反斜杠转正斜杠、剥离前导 ./ 或 /
     let path = raw_path
         .trim_matches(|c| c == '\'' || c == '"' || c == '`')
@@ -277,20 +282,9 @@ async fn execute_tool(
             }
         }
         "edit_file" => {
-            let old_string = params
-                .get("old_string")
-                .or_else(|| params.get("old_text"))
-                .or_else(|| params.get("original"))
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            let new_string = params
-                .get("new_string")
-                .or_else(|| params.get("new_text"))
-                .or_else(|| params.get("replacement"))
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
+            let old_string = first_str(&params, &["old_string", "old_text", "original"]).to_string();
+            let new_string =
+                first_str(&params, &["new_string", "new_text", "replacement"]).to_string();
             let conn = match state.db() {
                 Ok(c) => c,
                 Err(e) => return ToolOutcome { content: e, is_error: true },

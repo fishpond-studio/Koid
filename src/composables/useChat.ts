@@ -179,10 +179,47 @@ export function useChat() {
      * 超长工具结果截断，防止上下文爆炸。
      */
     const TOOL_RESULT_MAX = 12000
-    const clip = (s: string) =>
-      s.length > TOOL_RESULT_MAX
-        ? s.slice(0, TOOL_RESULT_MAX) + `\n…[结果过长已截断，原长 ${s.length} 字符]`
-        : s
+    /** 全部工具结果的合计上限，按「最近的优先」分配额度 */
+    const TOOL_RESULT_TOTAL_MAX = 60000
+    const TOOL_RESULT_OMITTED =
+      '（较早的工具结果已省略以控制上下文，如需该内容请重新调用工具获取）'
+
+    /**
+     * 单条上限挡不住长会话：autoCompact 默认关闭（settings.ts），
+     * N 次工具调用就是 N×TOOL_RESULT_MAX 字符，几十个回合足以顶穿上下文窗口。
+     * 故再加一道合计上限，并倒序分配额度——模型需要的是刚读过的内容，
+     * 旧结果降级为占位提示，让它知道该重新获取而不是以为没发生过。
+     */
+    const toolBudget = new Map<string, string>()
+    const allToolResults: Array<{ id: string; text: string }> = []
+    for (const m of sessions.messages) {
+      if (m.role !== 'assistant') continue
+      const calls = m.toolCalls ?? []
+      if (calls.length === 0) continue
+      const results = m.toolResults ?? []
+      for (const c of calls) {
+        allToolResults.push({
+          id: c.id,
+          text: results.find((x) => x.toolCallId === c.id)?.content ?? '（无执行记录）',
+        })
+      }
+    }
+    let budgetRemaining = TOOL_RESULT_TOTAL_MAX
+    for (let i = allToolResults.length - 1; i >= 0; i--) {
+      const { id, text } = allToolResults[i]
+      if (budgetRemaining <= 0) {
+        toolBudget.set(id, TOOL_RESULT_OMITTED)
+        continue
+      }
+      const cap = Math.min(TOOL_RESULT_MAX, budgetRemaining)
+      toolBudget.set(
+        id,
+        text.length > cap
+          ? `${text.slice(0, cap)}\n…[结果已截断，原长 ${text.length} 字符]`
+          : text,
+      )
+      budgetRemaining -= Math.min(text.length, cap)
+    }
 
     const history: ChatMessage[] = []
     for (const m of sessions.messages) {
@@ -206,13 +243,11 @@ export function useChat() {
           function: { name: c.name, arguments: c.arguments },
         })),
       } as ChatMessage)
-      // 每个调用对应一条 tool 结果
-      const results = m.toolResults ?? []
+      // 每个调用对应一条 tool 结果（额度已在上面按「最近优先」预分配）
       for (const c of calls) {
-        const r = results.find((x) => x.toolCallId === c.id)
         history.push({
           role: 'tool',
-          content: clip(r?.content ?? '（无执行记录）'),
+          content: toolBudget.get(c.id) ?? TOOL_RESULT_OMITTED,
           toolCallId: c.id,
           toolName: c.name,
         } as ChatMessage)
