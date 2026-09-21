@@ -112,7 +112,7 @@ const sorted = computed(() =>
                 :variant="s.source === 'builtin' ? 'secondary' : 'outline'"
                 class="text-[10px]"
               >
-                {{ s.source === 'builtin' ? t('skills.builtin') : (s.source === 'global' ? 'Global (~/.skills)' : t('skills.user')) }}
+                {{ s.source === 'builtin' ? t('skills.builtin') : (s.source === 'global' ? t('skills.global') : t('skills.user')) }}
               </Badge>
               <span class="text-[10px] text-muted-foreground">
                 {{ s.steps.length }} {{ t('skills.steps') }}
@@ -132,7 +132,7 @@ const sorted = computed(() =>
           </Button>
           <div class="ml-auto flex gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
             <Button
-              v-if="s.source !== 'builtin'"
+              v-if="s.source === 'user'"
               variant="ghost"
               size="icon"
               class="size-7"
@@ -141,7 +141,7 @@ const sorted = computed(() =>
               <Pencil class="size-3.5" />
             </Button>
             <Button
-              v-if="s.source !== 'builtin'"
+              v-if="s.source === 'user'"
               variant="ghost"
               size="icon"
               class="size-7 hover:text-destructive"

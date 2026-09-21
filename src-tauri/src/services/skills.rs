@@ -21,6 +21,12 @@ const MAX_STEP_VISITS: usize = 64;
 // ---------- YAML 解析与校验 ----------
 
 /// 解析标准 Agent SKILL.md 文件（YAML Frontmatter + Markdown Body）
+pub fn sanitize_skill_id(id: &str) -> String {
+    id.chars()
+        .filter(|c| c.is_alphanumeric() || matches!(c, '-' | '_'))
+        .collect()
+}
+
 pub fn parse_skill_markdown(content: &str, fallback_id: &str) -> Result<SkillDef, String> {
     let trimmed = content.trim_start();
     if !trimmed.starts_with("---") {
@@ -46,10 +52,23 @@ pub fn parse_skill_markdown(content: &str, fallback_id: &str) -> Result<SkillDef
     let fm: Frontmatter = serde_yml::from_str(frontmatter)
         .map_err(|e| format!("Frontmatter 解析失败: {e}"))?;
 
-    let id = fm.id.unwrap_or_else(|| fallback_id.to_string());
-    let name = fm.name.unwrap_or_else(|| id.clone());
+    let raw_id = fm.id.as_deref().unwrap_or(fallback_id).trim();
+    if raw_id.is_empty() {
+        return Err("Skill id 不能为空".to_string());
+    }
+    if !raw_id.chars().all(|c| c.is_alphanumeric() || matches!(c, '-' | '_')) {
+        return Err(format!("Skill id 包含非法字符，仅支持字母数字与 - _: {raw_id}"));
+    }
+    let safe_id = raw_id.to_string();
+
+    let name = match fm.name.as_deref().map(str::trim) {
+        Some(n) if !n.is_empty() => n.to_string(),
+        _ => return Err("Skill name 不能为空".to_string()),
+    };
+
     let description = fm.description.unwrap_or_default();
     let sys_prompt = fm.system_prompt.or(fm.system_prompt_camel);
+    let id = safe_id;
 
     // 标准 SKILL.md 自动适配为标准步骤：用户输入 -> LLM 处理（基于 Markdown 指导） -> 输出消息
     let prompt_template = format!(
@@ -110,11 +129,45 @@ pub fn parse_skill_markdown(content: &str, fallback_id: &str) -> Result<SkillDef
 }
 
 pub fn parse_skill(content: &str) -> Result<SkillDef, String> {
+    parse_skill_with_stem(content, "custom-skill")
+}
+
+pub fn parse_skill_with_stem(content: &str, stem: &str) -> Result<SkillDef, String> {
     let trimmed = content.trim_start();
-    if !trimmed.starts_with("---") {
-        return Err("Skill 必须为标准 SKILL.md 格式（以 --- YAML Frontmatter 开头）".to_string());
+    if trimmed.starts_with("---") {
+        return parse_skill_markdown(trimmed, stem);
     }
-    parse_skill_markdown(trimmed, "custom-skill")
+    // C1: 只读兼容遗留旧版 YAML 工作流，防止升级后用户老旧技能静默损坏
+    #[derive(serde::Deserialize)]
+    struct LegacyYaml {
+        id: Option<String>,
+        name: Option<String>,
+        description: Option<String>,
+        icon: Option<String>,
+        model: Option<String>,
+        #[serde(rename = "systemPrompt")]
+        system_prompt: Option<String>,
+        #[serde(default)]
+        steps: Vec<crate::models::SkillStep>,
+    }
+    if let Ok(legacy) = serde_yml::from_str::<LegacyYaml>(content) {
+        let raw_id = legacy.id.as_deref().unwrap_or(stem).trim();
+        let safe_id = sanitize_skill_id(raw_id);
+        if !safe_id.is_empty() && legacy.name.is_some() && !legacy.steps.is_empty() {
+            return Ok(SkillDef {
+                id: safe_id,
+                name: legacy.name.unwrap(),
+                description: legacy.description.unwrap_or_default(),
+                icon: legacy.icon,
+                model: legacy.model,
+                system_prompt: legacy.system_prompt,
+                steps: legacy.steps,
+                source: "user".to_string(),
+                enabled: true,
+            });
+        }
+    }
+    Err("Skill 必须为标准 SKILL.md 格式（以 --- YAML Frontmatter 开头）或包含有效 steps 的工作流定义".to_string())
 }
 
 // ---------- 模板变量 ----------
@@ -263,14 +316,23 @@ fn scan_skills_in_dir(dir: &std::path::Path, source_label: &str) -> Vec<SkillDef
             }
         }
 
-        // 2. 支持单文件 .md / .yaml / .yml
+        // 2. 支持单文件 .md 以及遗留 .yaml / .yml (只读兼容)
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        if ext == "md" {
+        if matches!(ext, "md" | "yaml" | "yml") {
             let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("skill");
             if let Ok(content) = std::fs::read_to_string(&path) {
-                if let Ok(mut def) = parse_skill_markdown(&content, stem) {
-                    def.source = source_label.to_string();
-                    out.push(def);
+                match parse_skill_with_stem(&content, stem) {
+                    Ok(mut def) => {
+                        // S2 安全门：全局目录 ~/.skills 等不受信来源默认 enabled = false，需用户在界面上显式确认
+                        def.source = source_label.to_string();
+                        if source_label == "global" {
+                            def.enabled = false;
+                        }
+                        out.push(def);
+                    }
+                    Err(e) => {
+                        eprintln!("[koid::skills] 忽略无效技能文件 {:?}: {e}", path);
+                    }
                 }
             }
         }
@@ -324,17 +386,37 @@ pub fn save_user_skill(app: &AppHandle, yaml: &str) -> Result<SkillDef, String> 
 }
 
 pub fn delete_user_skill(app: &AppHandle, id: &str) -> Result<(), String> {
+    let safe_id = sanitize_skill_id(id.trim());
+    if safe_id.is_empty() {
+        return Err("非法或空的 Skill id".to_string());
+    }
     let dir = user_skills_dir(app)?;
-    let path = dir.join(format!("{id}.md"));
-    if path.exists() {
-        return std::fs::remove_file(&path).map_err(|e| format!("删除失败: {e}"));
+    if !dir.exists() {
+        return Err("用户技能目录不存在".to_string());
     }
-    // 同时检查 skills/<id>/ 目录
-    let sub_dir = dir.join(id);
+    let canon_dir = dir.canonicalize().map_err(|e| format!("无法解析目录路径: {e}"))?;
+
+    // 1. 删除单文件 <id>.md
+    let file_path = dir.join(format!("{safe_id}.md"));
+    if file_path.exists() {
+        if let Ok(canon_file) = file_path.canonicalize() {
+            if canon_file.starts_with(&canon_dir) && canon_file != canon_dir {
+                return std::fs::remove_file(&canon_file).map_err(|e| format!("删除失败: {e}"));
+            }
+        }
+    }
+
+    // 2. 删除技能子目录 <id>/
+    let sub_dir = dir.join(&safe_id);
     if sub_dir.is_dir() {
-        return std::fs::remove_dir_all(&sub_dir).map_err(|e| format!("删除目录失败: {e}"));
+        if let Ok(canon_subdir) = sub_dir.canonicalize() {
+            if canon_subdir.starts_with(&canon_dir) && canon_subdir != canon_dir {
+                return std::fs::remove_dir_all(&canon_subdir).map_err(|e| format!("删除目录失败: {e}"));
+            }
+        }
     }
-    Err("内置 Skill 不可删除或不存在".to_string())
+
+    Err("内置或全局 Skill 不支持在应用内直接删除，或技能文件不存在".to_string())
 }
 
 // ---------- 模型解析 ----------
@@ -506,7 +588,7 @@ pub async fn run(app: AppHandle, skill: SkillDef, request_id: String, vars: Hash
                     temperature: None,
                     top_p: None,
                     max_tokens: None,
-                    system: skill.system_prompt.clone(),
+                    system: if skill.source == "global" { None } else { skill.system_prompt.clone() },
                     stream: false,
                     thinking_level: None,
                     session_id: None,
@@ -633,18 +715,24 @@ mod tests {
     }
 
     #[test]
-    fn builtin_yaml_parses() {
+    fn builtin_markdown_parses() {
         let skills = builtin_skills();
         assert_eq!(skills.len(), 2);
         let review = skills.iter().find(|s| s.id == "code-review").unwrap();
-        assert_eq!(review.steps.len(), 5);
+        // 标准 SKILL.md 自动映射为三段标准流程：input -> execute(llm) -> output(message)
+        assert_eq!(review.steps.len(), 3);
         let ids: Vec<&str> = review.steps.iter().map(|s| s.id.as_str()).collect();
-        assert_eq!(ids, vec!["read", "review", "check", "fix", "done"]);
+        assert_eq!(ids, vec!["input", "execute", "output"]);
+        assert!(review.system_prompt.as_deref().unwrap().contains("代码审查"));
     }
 
     #[test]
     fn validation_catches_bad_skill() {
-        assert!(parse_skill("id: x\nname: y\nsteps: []").is_err());
-        assert!(parse_skill("not yaml: [").is_err());
+        // B2/S1: 针对 parse_skill_markdown 的真实字段与格式校验
+        assert!(parse_skill("not markdown or yaml").is_err());
+        assert!(parse_skill("---\nid: \"\"\nname: \"\"\n---\nbody").is_err());
+        assert!(parse_skill("---\nid: valid-id\nname: \"\"\n---\nbody").is_err());
+        assert!(parse_skill("---\nid: \"invalid/id/with/slash\"\nname: Test\n---\nbody").is_err());
+        assert!(parse_skill("---\nname: MissingIdFallback\n---\nbody").is_ok());
     }
 }
