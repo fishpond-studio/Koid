@@ -310,20 +310,30 @@ pub fn user_skills_dir(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-pub fn load_user_skills(app: &AppHandle) -> Vec<SkillDef> {
-    let Ok(dir) = user_skills_dir(app) else { return vec![] };
-    let Ok(entries) = std::fs::read_dir(&dir) else { return vec![] };
+fn global_skills_dirs(app: &AppHandle) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Ok(home) = app.path().home_dir() {
+        // 1. npx skills -g 默认全局安装目录: ~/.skills/
+        dirs.push(home.join(".skills"));
+        // 2. 常见 agent 生态目录: ~/.agents/skills/
+        dirs.push(home.join(".agents").join("skills"));
+    }
+    dirs
+}
+
+fn scan_skills_in_dir(dir: &std::path::Path, source_label: &str) -> Vec<SkillDef> {
+    let Ok(entries) = std::fs::read_dir(dir) else { return vec![] };
     let mut out = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
-        // 1. 支持子目录中的 SKILL.md (标准 Agent 技能格式: skills/<name>/SKILL.md)
+        // 1. 标准 Agent 技能目录: <dir>/<name>/SKILL.md
         if path.is_dir() {
             let skill_md = path.join("SKILL.md");
             if skill_md.is_file() {
                 if let Ok(content) = std::fs::read_to_string(&skill_md) {
                     let dir_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("skill");
                     if let Ok(mut def) = parse_skill_markdown(&content, dir_name) {
-                        def.source = "user".to_string();
+                        def.source = source_label.to_string();
                         out.push(def);
                         continue;
                     }
@@ -337,19 +347,43 @@ pub fn load_user_skills(app: &AppHandle) -> Vec<SkillDef> {
             let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("skill");
             if let Ok(content) = std::fs::read_to_string(&path) {
                 if let Ok(mut def) = parse_skill_markdown(&content, stem) {
-                    def.source = "user".to_string();
+                    def.source = source_label.to_string();
                     out.push(def);
                 }
             }
         } else if matches!(ext, "yaml" | "yml") {
             if let Ok(content) = std::fs::read_to_string(&path) {
                 if let Ok(mut def) = parse_skill(&content) {
-                    def.source = "user".to_string();
+                    def.source = source_label.to_string();
                     out.push(def);
                 }
             }
         }
     }
+    out
+}
+pub fn load_user_skills(app: &AppHandle) -> Vec<SkillDef> {
+    let mut out = Vec::new();
+    let mut seen_ids = std::collections::HashSet::new();
+
+    // 1. 扫描 Koid 自身应用数据目录
+    if let Ok(dir) = user_skills_dir(app) {
+        for s in scan_skills_in_dir(&dir, "user") {
+            if seen_ids.insert(s.id.clone()) {
+                out.push(s);
+            }
+        }
+    }
+
+    // 2. 扫描系统全局目录 (如 npx skills add -g 安装的 ~/.skills/)
+    for global_dir in global_skills_dirs(app) {
+        for s in scan_skills_in_dir(&global_dir, "global") {
+            if seen_ids.insert(s.id.clone()) {
+                out.push(s);
+            }
+        }
+    }
+
     out
 }
 
