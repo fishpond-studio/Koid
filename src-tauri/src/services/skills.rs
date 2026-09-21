@@ -110,74 +110,11 @@ pub fn parse_skill_markdown(content: &str, fallback_id: &str) -> Result<SkillDef
 }
 
 pub fn parse_skill(content: &str) -> Result<SkillDef, String> {
-    // 优先支持标准 SKILL.md (带 --- Frontmatter)
     let trimmed = content.trim_start();
-    if trimmed.starts_with("---") {
-        return parse_skill_markdown(trimmed, "custom-skill");
+    if !trimmed.starts_with("---") {
+        return Err("Skill 必须为标准 SKILL.md 格式（以 --- YAML Frontmatter 开头）".to_string());
     }
-
-    let mut def: SkillDef =
-        serde_yml::from_str(content).map_err(|e| format!("YAML 解析失败: {e}"))?;
-    validate(&def)?;
-    if def.source.is_empty() {
-        def.source = "user".to_string();
-    }
-    def.enabled = true;
-    Ok(def)
-}
-
-fn validate(def: &SkillDef) -> Result<(), String> {
-    if def.id.trim().is_empty() {
-        return Err("缺少 id".to_string());
-    }
-    if def.name.trim().is_empty() {
-        return Err("缺少 name".to_string());
-    }
-    if def.steps.is_empty() {
-        return Err("Skill 至少需要一个步骤".to_string());
-    }
-    // 步骤 id 唯一
-    let mut seen = std::collections::HashSet::new();
-    for s in &def.steps {
-        if s.id.trim().is_empty() {
-            return Err("存在无 id 的步骤".to_string());
-        }
-        if !seen.insert(s.id.clone()) {
-            return Err(format!("步骤 id 重复: {}", s.id));
-        }
-    }
-    // 步骤必填字段 + condition 跳转目标存在性
-    for s in &def.steps {
-        match s.step_type.as_str() {
-            "llm" => {
-                if s.prompt.as_deref().unwrap_or("").is_empty() {
-                    return Err(format!("llm 步骤 {} 缺少 prompt", s.id));
-                }
-            }
-            "condition" => {
-                if s.condition.as_deref().unwrap_or("").is_empty() {
-                    return Err(format!("condition 步骤 {} 缺少 condition", s.id));
-                }
-                for target in [&s.then_step, &s.else_step].into_iter().flatten() {
-                    if !seen.contains(target) {
-                        return Err(format!("步骤 {} 跳转目标不存在: {target}", s.id));
-                    }
-                }
-            }
-            "message" | "input" => {
-                if s.content.as_deref().unwrap_or("").is_empty() {
-                    return Err(format!("{} 步骤 {} 缺少 content", s.step_type, s.id));
-                }
-            }
-            "tool" => {
-                if s.tool.as_deref().unwrap_or("").is_empty() {
-                    return Err(format!("tool 步骤 {} 缺少 tool", s.id));
-                }
-            }
-            other => return Err(format!("未知步骤类型: {other}")),
-        }
-    }
-    Ok(())
+    parse_skill_markdown(trimmed, "custom-skill")
 }
 
 // ---------- 模板变量 ----------
@@ -271,7 +208,7 @@ pub fn eval_condition(expr: &str, scope: &HashMap<String, String>) -> Result<boo
 pub fn builtin_skills() -> Vec<SkillDef> {
     let mut out = Vec::new();
 
-    // 1. 标准行业格式：内置 SKILL.md (YAML Frontmatter + Markdown)
+    // 纯标准 Agent 规范：内置 SKILL.md (YAML Frontmatter + Markdown)
     let standard_skills: &[(&str, &str)] = &[
         ("code-review", include_str!("../../../skills/code-review/SKILL.md")),
         ("explain-error", include_str!("../../../skills/explain-error/SKILL.md")),
@@ -280,21 +217,6 @@ pub fn builtin_skills() -> Vec<SkillDef> {
         if let Ok(mut def) = parse_skill_markdown(content, id) {
             def.source = "builtin".to_string();
             out.push(def);
-        }
-    }
-
-    // 2. 向下兼容现有的内置 YAML 工作流
-    let yamls: &[&str] = &[
-        include_str!("../../builtin-skills/code-review.yaml"),
-        include_str!("../../builtin-skills/explain-error.yaml"),
-    ];
-    for y in yamls {
-        if let Ok(mut d) = parse_skill(y) {
-            // 若标准已包含同名，则避免重复
-            if !out.iter().any(|existing| existing.id == d.id) {
-                d.source = "builtin".to_string();
-                out.push(d);
-            }
         }
     }
 
@@ -351,13 +273,6 @@ fn scan_skills_in_dir(dir: &std::path::Path, source_label: &str) -> Vec<SkillDef
                     out.push(def);
                 }
             }
-        } else if matches!(ext, "yaml" | "yml") {
-            if let Ok(content) = std::fs::read_to_string(&path) {
-                if let Ok(mut def) = parse_skill(&content) {
-                    def.source = source_label.to_string();
-                    out.push(def);
-                }
-            }
         }
     }
     out
@@ -400,11 +315,7 @@ pub fn save_user_skill(app: &AppHandle, yaml: &str) -> Result<SkillDef, String> 
     }
     let dir = user_skills_dir(app)?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("创建目录失败: {e}"))?;
-    let file_name = if yaml.trim_start().starts_with("---") {
-        format!("{safe_id}.md")
-    } else {
-        format!("{safe_id}.yaml")
-    };
+    let file_name = format!("{safe_id}.md");
     std::fs::write(dir.join(file_name), yaml)
         .map_err(|e| format!("写入 Skill 失败: {e}"))?;
     let mut saved = def;
@@ -414,11 +325,9 @@ pub fn save_user_skill(app: &AppHandle, yaml: &str) -> Result<SkillDef, String> 
 
 pub fn delete_user_skill(app: &AppHandle, id: &str) -> Result<(), String> {
     let dir = user_skills_dir(app)?;
-    for ext in ["md", "yaml", "yml"] {
-        let path = dir.join(format!("{id}.{ext}"));
-        if path.exists() {
-            return std::fs::remove_file(&path).map_err(|e| format!("删除失败: {e}"));
-        }
+    let path = dir.join(format!("{id}.md"));
+    if path.exists() {
+        return std::fs::remove_file(&path).map_err(|e| format!("删除失败: {e}"));
     }
     // 同时检查 skills/<id>/ 目录
     let sub_dir = dir.join(id);

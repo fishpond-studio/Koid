@@ -371,7 +371,7 @@ export default {
     fileTooLarge: '文件超过 1MB，请分块或精简内容（§7.3）',
     clipboardDenied: '系统拒绝了剪贴板访问',
     deleteConfirm: '确定删除技能「{name}」？',
-    yamlPlaceholder: '在此编辑 Skill（支持标准 SKILL.md 或 YAML 工作流）…',
+    yamlPlaceholder: '在此编写标准 SKILL.md（以 --- Frontmatter 开头）…',
   },
   error: {
     title: '出错了',

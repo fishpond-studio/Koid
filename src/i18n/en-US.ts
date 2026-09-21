@@ -385,7 +385,7 @@ export default {
     fileTooLarge: 'File exceeds 1MB — please chunk it or trim content.',
     clipboardDenied: 'Clipboard access denied by the system',
     deleteConfirm: 'Delete skill "{name}"?',
-    yamlPlaceholder: 'Edit skill here (supports standard SKILL.md or YAML workflow)…',
+    yamlPlaceholder: 'Write standard SKILL.md here (starts with --- Frontmatter)…',
   },
   error: {
     title: 'Something went wrong',
