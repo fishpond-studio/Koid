@@ -112,7 +112,7 @@ const sorted = computed(() =>
                 :variant="s.source === 'builtin' ? 'secondary' : 'outline'"
                 class="text-[10px]"
               >
-                {{ s.source === 'builtin' ? t('skills.builtin') : t('skills.user') }}
+                {{ s.source === 'builtin' ? t('skills.builtin') : (s.source === 'global' ? t('skills.global') : t('skills.user')) }}
               </Badge>
               <span class="text-[10px] text-muted-foreground">
                 {{ s.steps.length }} {{ t('skills.steps') }}

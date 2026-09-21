@@ -295,7 +295,7 @@ export interface SkillDef {
   systemPrompt?: string | null
   steps: SkillStep[]
   /** builtin / user */
-  source: 'builtin' | 'user'
+  source: 'builtin' | 'user' | 'global'
   enabled: boolean
 }
 
