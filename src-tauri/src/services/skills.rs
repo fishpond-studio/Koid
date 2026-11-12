@@ -27,14 +27,19 @@ pub fn sanitize_skill_id(id: &str) -> String {
         .collect()
 }
 
-/// 定位 frontmatter 结束分隔符：返回行首 "\n---" 中 '\n' 的字节偏移，
-/// 要求 "---" 之后为换行或文件结尾（即独占一行），不会命中值内部的 ---。
+/// 定位 frontmatter 结束分隔符：返回行首 "\n---" 中 '\n' 的字节偏移。
+///
+/// 判定条件：该行去掉行尾空白后恰好是 "---"（即独占一行），不会命中值内部的 ---
+/// （如 before---after）；行尾带空格/制表符的分隔符同样接受，与开头分隔符
+/// 使用 trim_start 的宽容口径保持一致。
 fn find_frontmatter_end(rest: &str) -> Option<usize> {
     let mut from = 0;
     while let Some(pos) = rest[from..].find("\n---") {
         let abs = from + pos;
-        let tail = &rest[abs + 4..];
-        if tail.is_empty() || tail.starts_with('\n') || tail.starts_with("\r\n") {
+        // 从 abs+1 起取到行尾（不含换行符），去掉行尾空白后应恰为 "---"
+        let line_rest = &rest[abs + 1..];
+        let line_end = line_rest.find(['\n', '\r']).unwrap_or(line_rest.len());
+        if line_rest[..line_end].trim_end() == "---" {
             return Some(abs);
         }
         from = abs + 1;
@@ -406,18 +411,33 @@ struct EnabledGlobalSkill {
     hash: String,
 }
 
-/// 计算技能注入内容的 SHA-256：正文 + system_prompt + 各步骤 prompt/content/condition。
-/// 这些字段决定真正进入模型提示词的内容，任一变更都应触发重新审阅。
+/// 计算技能内容的 SHA-256，覆盖所有会影响运行行为的字段：
+/// 正文、system_prompt，以及各步骤的 prompt / content / condition，
+/// 和 tool 步骤的 tool / server / args（后者决定实际调用哪个 MCP 工具及参数）。
+/// 任一变更都应触发重新审阅。
+///
+/// 每个字段以长度前缀分隔，避免相邻字段拼接后产生歧义
+/// （如 "ab"+"c" 与 "a"+"bc" 哈希相同）。
 fn skill_content_hash(s: &SkillDef) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
-    hasher.update(s.body.as_deref().unwrap_or("").as_bytes());
-    hasher.update(s.system_prompt.as_deref().unwrap_or("").as_bytes());
+    let mut feed = |v: &str| {
+        hasher.update((v.len() as u64).to_le_bytes());
+        hasher.update(v.as_bytes());
+    };
+    feed(s.body.as_deref().unwrap_or(""));
+    feed(s.system_prompt.as_deref().unwrap_or(""));
     for step in &s.steps {
-        hasher.update(step.id.as_bytes());
-        hasher.update(step.prompt.as_deref().unwrap_or("").as_bytes());
-        hasher.update(step.content.as_deref().unwrap_or("").as_bytes());
-        hasher.update(step.condition.as_deref().unwrap_or("").as_bytes());
+        feed(&step.id);
+        feed(&step.step_type);
+        feed(step.prompt.as_deref().unwrap_or(""));
+        feed(step.content.as_deref().unwrap_or(""));
+        feed(step.condition.as_deref().unwrap_or(""));
+        feed(step.then_step.as_deref().unwrap_or(""));
+        feed(step.else_step.as_deref().unwrap_or(""));
+        feed(step.tool.as_deref().unwrap_or(""));
+        feed(step.server.as_deref().unwrap_or(""));
+        feed(step.args.as_deref().unwrap_or(""));
     }
     hasher.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -898,5 +918,58 @@ mod tests {
         let changed = parse_skill_markdown("---\nname: A\n---\nworld", "a").unwrap();
         assert_eq!(skill_content_hash(&a), skill_content_hash(&same));
         assert_ne!(skill_content_hash(&a), skill_content_hash(&changed));
+    }
+
+    #[test]
+    fn frontmatter_end_tolerates_trailing_whitespace() {
+        // 分隔符行尾带空格/制表符时应正常识别（与开头分隔符的宽容口径一致）
+        for md in [
+            "---\nname: X\n---  \nbody",
+            "---\nname: X\n---\t\nbody",
+            "---\nname: X\n---   ",
+            "---\r\nname: X\r\n---  \r\nbody",
+        ] {
+            let def = parse_skill_markdown(md, "x")
+                .unwrap_or_else(|e| panic!("应解析成功 {md:?}: {e}"));
+            assert_eq!(def.name, "X", "输入: {md:?}");
+        }
+        // 值内部的 --- 仍不得被当作结束标记
+        let def = parse_skill_markdown("---\nname: X\ndescription: a---b\n---\nbody", "x").unwrap();
+        assert_eq!(def.description, "a---b");
+        assert_eq!(def.body.as_deref(), Some("body"));
+    }
+
+    #[test]
+    fn content_hash_covers_tool_step_fields() {
+        // tool 步骤决定实际调用的 MCP 工具与参数，任一变更都必须改变哈希
+        let base = "id: wf\nname: WF\nsteps:\n  - id: t\n    type: tool\n    tool: read_file\n    server: fs\n    args: '{\"path\":\"a\"}'\n";
+        let h0 = skill_content_hash(&parse_skill_with_stem(base, "wf").unwrap());
+
+        for (field, old, new) in [
+            ("tool", "read_file", "delete_file"),
+            ("server", "fs", "shell"),
+            ("args", "{\"path\":\"a\"}", "{\"path\":\"/etc/passwd\"}"),
+        ] {
+            let mutated = base.replace(old, new);
+            assert_ne!(mutated, base, "用例未生效: {field}");
+            let h = skill_content_hash(&parse_skill_with_stem(&mutated, "wf").unwrap());
+            assert_ne!(h, h0, "{field} 变更后哈希应变化");
+        }
+    }
+
+    #[test]
+    fn content_hash_fields_are_length_prefixed() {
+        // 字段边界必须有长度前缀，否则 ("ab","") 与 ("a","b") 会碰撞
+        let mut a = parse_skill_markdown("---\nname: A\n---\nab", "a").unwrap();
+        a.system_prompt = Some(String::new());
+        let mut b = parse_skill_markdown("---\nname: A\n---\na", "a").unwrap();
+        b.system_prompt = Some("b".to_string());
+        assert_ne!(skill_content_hash(&a), skill_content_hash(&b));
+
+        let mut c = parse_skill_markdown("---\nname: A\n---\nab", "a").unwrap();
+        c.system_prompt = Some("c".to_string());
+        let mut d = parse_skill_markdown("---\nname: A\n---\na", "a").unwrap();
+        d.system_prompt = Some("bc".to_string());
+        assert_ne!(skill_content_hash(&c), skill_content_hash(&d));
     }
 }
