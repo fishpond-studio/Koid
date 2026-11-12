@@ -14,7 +14,7 @@ import { useSkillStore } from '@/stores/skills'
 import { toApiError } from '@/lib/api'
 import type { SkillDef } from '@/types'
 
-/** Skill YAML 编辑器：新建/编辑（§4.7 双模式编辑，源码优先） */
+/** Skill 编辑器：新建/编辑（标准 SKILL.md 源码优先） */
 const props = defineProps<{ open: boolean; skill: SkillDef | null }>()
 const emit = defineEmits<{ 'update:open': [v: boolean]; saved: [] }>()
 
@@ -24,69 +24,41 @@ const store = useSkillStore()
 const content = ref('')
 const saving = ref(false)
 
-const STARTER = `# Skill 定义示例
+// 标准 Agent SKILL.md 模板（YAML Frontmatter + Markdown Body）
+const STARTER = `---
 id: my-skill
 name: My Skill
 description: What this skill does
+# icon: sparkles           # 可选：图标名
 # model: gpt-4o            # 可选：按 model_id / displayName 指定
-# systemPrompt: You are... # 可选：步骤通用 system prompt
-steps:
-  - id: ask
-    type: input
-    content: What input do you need?
+# system_prompt: You are…  # 可选：该技能的 system prompt
+---
 
-  - id: respond
-    type: llm
-    prompt: |
-      Process the following input:
+# 任务说明
 
-      {{ask.output}}
-
-  - id: done
-    type: message
-    content: "{{respond.output}}"
+在这里用 Markdown 描述技能的具体任务与要求。
+正文会与用户输入一起作为提示词发送给模型。
 `
 
 watch(
   () => props.open,
   (open) => {
     if (!open) return
-    content.value = props.skill
-      ? serializeYaml(props.skill)
-      : STARTER
+    content.value = props.skill ? serializeSkillMd(props.skill) : STARTER
   },
 )
 
-/** 把 SkillDef 序列化为 YAML（前端轻量实现；编辑以文本为准，保存时后端再校验） */
-function serializeYaml(s: SkillDef): string {
-  const lines: string[] = [
-    `id: ${s.id}`,
-    `name: ${s.name}`,
-    `description: ${s.description}`,
-  ]
-  if (s.icon) lines.push(`icon: ${s.icon}`)
-  if (s.model) lines.push(`model: ${s.model}`)
-  if (s.systemPrompt) lines.push(`systemPrompt: |\n  ${s.systemPrompt.replaceAll('\n', '\n  ')}`)
-  lines.push('steps:')
-  for (const step of s.steps) {
-    lines.push(`  - id: ${step.id}`)
-    lines.push(`    type: ${step.type}`)
-    const fields: [string, string | null | undefined][] = [
-      ['prompt', step.prompt],
-      ['content', step.content],
-      ['condition', step.condition],
-      ['then', step.then],
-      ['else', step.else],
-      ['tool', step.tool],
-      ['server', step.server],
-      ['args', step.args],
-    ]
-    for (const [k, v] of fields) {
-      if (v === undefined || v === null) continue
-      lines.push(`    ${k}: |\n${v.split('\n').map((l) => `      ${l}`).join('\n')}`)
-    }
+/** 把 SkillDef 序列化为标准 SKILL.md（前端轻量实现；编辑以文本为准，保存时后端再校验） */
+function serializeSkillMd(s: SkillDef): string {
+  const fm: string[] = ['---', `id: ${s.id}`, `name: ${s.name}`]
+  if (s.description) fm.push(`description: ${s.description}`)
+  if (s.icon) fm.push(`icon: ${s.icon}`)
+  if (s.model) fm.push(`model: ${s.model}`)
+  if (s.systemPrompt) {
+    fm.push(`system_prompt: |\n  ${s.systemPrompt.replaceAll('\n', '\n  ')}`)
   }
-  return lines.join('\n') + '\n'
+  fm.push('---', '')
+  return fm.join('\n') + (s.body ?? '') + '\n'
 }
 
 async function save() {

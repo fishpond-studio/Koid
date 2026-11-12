@@ -350,12 +350,17 @@ export default {
   },
   skills: {
     title: '技能',
-    subtitle: '可复用的 AI 工作流。内置技能只读，用户技能以 YAML 编辑。',
+    subtitle: '可复用的 AI 工作流。内置技能只读，用户技能以标准 SKILL.md 编辑；全局技能需显式启用后方可运行。',
     add: '新建技能',
     edit: '编辑技能',
     run: '运行',
     builtin: '内置',
     user: '用户',
+    global: '全局',
+    enableGlobal: '确认启用',
+    enableGlobalTitle: '启用全局技能',
+    globalTrustHint:
+      '该技能来自全局目录（~/.skills 等），其内容将注入到模型提示词中，可能包含恶意指令。请仔细审阅下方正文，确认可信后再启用。',
     steps: '步',
     empty: '暂无技能',
     runFailed: '技能执行失败',
@@ -371,7 +376,7 @@ export default {
     fileTooLarge: '文件超过 1MB，请分块或精简内容（§7.3）',
     clipboardDenied: '系统拒绝了剪贴板访问',
     deleteConfirm: '确定删除技能「{name}」？',
-    yamlPlaceholder: '在此粘贴 Skill YAML…',
+    yamlPlaceholder: '在此编写标准 SKILL.md（以 --- Frontmatter 开头）…',
   },
   error: {
     title: '出错了',

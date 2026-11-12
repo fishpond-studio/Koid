@@ -383,6 +383,9 @@ pub struct SkillDef {
     /// skill tool 步骤所需的 MCP 工具（引擎解析）
     #[serde(default)]
     pub enabled: bool,
+    /// 标准 SKILL.md 正文（扫描时提取，用于全局技能运行前的安全确认展示）
+    #[serde(default)]
+    pub body: Option<String>,
 }
 
 /// Skill 执行事件载荷（事件名 skill:event）

@@ -364,12 +364,18 @@ export default {
   },
   skills: {
     title: 'Skills',
-    subtitle: 'Reusable AI workflows. Built-ins are read-only; user skills are editable YAML.',
+    subtitle:
+      'Reusable AI workflows. Built-ins are read-only; user skills are editable SKILL.md; global skills must be explicitly enabled before running.',
     add: 'New skill',
     edit: 'Edit skill',
     run: 'Run',
     builtin: 'Built-in',
     user: 'User',
+    global: 'Global',
+    enableGlobal: 'Enable',
+    enableGlobalTitle: 'Enable global skill',
+    globalTrustHint:
+      'This skill comes from a global directory (~/.skills etc.). Its content is injected into the model prompt and may contain malicious instructions. Review the body below carefully before enabling.',
     steps: 'steps',
     empty: 'No skills yet',
     runFailed: 'Skill failed',
@@ -385,7 +391,7 @@ export default {
     fileTooLarge: 'File exceeds 1MB — please chunk it or trim content.',
     clipboardDenied: 'Clipboard access denied by the system',
     deleteConfirm: 'Delete skill "{name}"?',
-    yamlPlaceholder: 'Paste skill YAML here…',
+    yamlPlaceholder: 'Write standard SKILL.md here (starts with --- Frontmatter)…',
   },
   error: {
     title: 'Something went wrong',

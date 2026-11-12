@@ -23,6 +23,12 @@ pub fn delete_skill(id: String, app: AppHandle) -> Result<(), String> {
     skills::delete_user_skill(&app, &id)
 }
 
+/// 用户显式确认后启用全局技能（持久化到 settings）
+#[tauri::command]
+pub fn enable_global_skill(id: String, app: AppHandle) -> Result<(), String> {
+    skills::enable_global_skill(&app, &id)
+}
+
 /// 后台执行 Skill；进度经 `skill:event` 事件推送
 #[tauri::command]
 pub fn run_skill(
@@ -37,6 +43,10 @@ pub fn run_skill(
         .chain(skills::load_user_skills(&app))
         .find(|s| s.id == skill_id)
         .ok_or_else(|| format!("Skill 不存在: {skill_id}"))?;
+    // S2 安全门：未启用的技能（默认禁用的全局技能）拒绝执行
+    if !skill.enabled {
+        return Err("DISABLED:该技能来自不受信的全局目录，需先显式启用后才能运行".to_string());
+    }
 
     let app_bg = app.clone();
     tauri::async_runtime::spawn(async move {

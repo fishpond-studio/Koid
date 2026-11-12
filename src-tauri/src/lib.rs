@@ -78,6 +78,7 @@ pub fn run() {
             commands::skills::list_skills,
             commands::skills::save_skill,
             commands::skills::delete_skill,
+            commands::skills::enable_global_skill,
             commands::skills::run_skill,
             commands::skills::skill_respond,
             commands::skills::skill_cancel,

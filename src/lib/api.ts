@@ -148,6 +148,7 @@ export const skillsApi = {
   list: () => invoke<SkillDef[]>('list_skills'),
   save: (content: string) => invoke<SkillDef>('save_skill', { content }),
   remove: (id: string) => invoke<void>('delete_skill', { id }),
+  enableGlobal: (id: string) => invoke<void>('enable_global_skill', { id }),
   run: (requestId: string, skillId: string, vars: Record<string, string>) =>
     invoke<void>('run_skill', { requestId, skillId, vars }),
   respond: (requestId: string, value: string) =>
